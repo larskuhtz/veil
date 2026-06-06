@@ -235,12 +235,29 @@ def mkTheoremText (vc : VerificationCondition VCMetaT ResultT) : CoreM String :=
 def mkVCResult [Monad m] [MonadError m] [MonadLiftT BaseIO m] [MonadLiftT CoreM m] (mgr : VCManager VCMetaT ResultT) (vcId : VCId) : m (VCResult VCMetaT ResultT) := do
   let .some vc := mgr.nodes[vcId]? | throwError s!"mkVCResult: VC {vcId} not found in manager"
   let timing ← mkTimingData mgr vc
-  -- Generate theorem text for all VCs (for click-to-insert functionality)
-  let theoremText ← some <$> liftM (mkTheoremText vc)
+  let status := mgr._doneWith[vcId]?
+  -- `theoremText` is consumed by:
+  --   * `undischargedTheoremTexts` / `addUndischargedTheoremSuggestion`,
+  --     which build proof-stub suggestions for *failed* VCs.
+  --   * The widget's click-to-insert button, which is meaningful only on
+  --     VCs the user wants to discharge by hand — i.e. failed ones.
+  -- For proven, dormant, or still-in-progress VCs nobody reads the field,
+  -- yet generating it for every VC on every refresh costs an
+  -- `Lean.PrettyPrinter.ppCommand` per VC under `vcManager.atomically`.
+  -- With N VCs and ≈ N state-change refreshes that's O(N²) pretty-prints
+  -- under the manager mutex, throttling dispatch on bulk loads (measured
+  -- 31× dispatch-throughput improvement on a ≈1500-VC specification from
+  -- skipping this work for non-failed VCs). Compute lazily — only when the
+  -- VC is in a status the consumers actually care about.
+  let needsStub :=
+    match status with
+    | some .disproven | some .unknown | some .error | some .timeout => true
+    | some .proven | none => false
+  let theoremText ← if needsStub then some <$> liftM (mkTheoremText vc) else pure none
   return {
     id := vcId
     name := vc.name
-    status := mgr._doneWith[vcId]?
+    status := status
     metadata := vc.metadata
     timing := timing
     alternativeFor := mgr.findPrimaryVC vcId
