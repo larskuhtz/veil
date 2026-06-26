@@ -159,6 +159,17 @@ structure Discharger (ResultT : Type) where
   the `task` field for later access. -/
   private mkTask : BaseIO SnapshotTreeTask
 
+  /-- Closure that re-elaborates the proof witness on demand, populated for
+  successfully proven VCs whose witness was dropped from `_dischargerResults`
+  for lazy regeneration (`veil.lazyWitnessRegen`).
+
+  The closure captures `env0` (the elaboration env at discharge time), the
+  proof script `term`, and the `VCStatement` — together enough to repeat the
+  original elaboration. `#gen_theorems` invokes this closure to rebuild the
+  witness; until then the per-VC heap footprint stays at ~O(closure) instead
+  of the ~10 MB of unique witness `Expr` nodes per VC. -/
+  regenWitness? : Option (Lean.Elab.Command.CommandElabM Witness) := none
+
 structure VCData (VCMetaT : Type) extends VCStatement where
   /-- Metadata associated with this VC, provided by the frontend. -/
   metadata : VCMetaT
@@ -415,6 +426,20 @@ def VCManager.provenWitness? (mgr : VCManager VCMetaT ResultT)
   let dischargerId ← vc.successful
   match mgr._dischargerResults[(vcId, dischargerId)]? with
   | some (.proven (some witness) _ _) => some (vc, witness)
+  | _ => none
+
+/-- Lazy variant of `provenWitness?`: returns the VC together with either the
+stored witness (if any) or the discharger's `regenWitness?` closure. Used by
+`#gen_theorems` to materialize theorems on demand when the discharger dropped
+its witness for steady-state heap relief (`veil.lazyWitnessRegen`). -/
+def VCManager.provenWitnessOrRegen? (mgr : VCManager VCMetaT ResultT)
+    (vcId : VCId) : Option (VerificationCondition VCMetaT ResultT ×
+      (Option Witness × Option (Lean.Elab.Command.CommandElabM Witness))) := do
+  let vc ← mgr.nodes[vcId]?
+  let dischargerId ← vc.successful
+  let discharger ← vc.dischargers[dischargerId]?
+  match mgr._dischargerResults[(vcId, dischargerId)]? with
+  | some (.proven witness? _ _) => some (vc, (witness?, discharger.regenWitness?))
   | _ => none
 
 def Discharger.run (discharger : Discharger ResultT) : BaseIO (Discharger ResultT) := do
