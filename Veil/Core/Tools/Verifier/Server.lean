@@ -105,6 +105,19 @@ def runManager (cancelTk? : Option IO.CancelToken := none) : CommandElabM Unit :
             if dischargerId.managerId != mgr._managerId then
               return
             mgr ← mgr.recordDischargerResult dischargerId res
+            -- Release the just-completed discharger's task handle: it has fired
+            -- and its result is now in `_dischargerResults`, but `Discharger.task`
+            -- still references the completed `Task`, which retains its
+            -- `SnapshotTree` (message log + trace state). On large protocols
+            -- (1500+ VCs) these accumulate to multiple GB. The handle has no
+            -- consumers once the result is recorded, so null it to let Lean
+            -- RC-free the snapshot tree. Must happen BEFORE the refill below:
+            -- `fillAvailableSlotsLocked` reads `inFlightCount` off this manager.
+            if let some vc := mgr.nodes[dischargerId.vcId]? then
+              if let some d := vc.dischargers[dischargerId.dischargerId]? then
+                let d' := { d with task := none }
+                let vc' := { vc with dischargers := vc.dischargers.set! dischargerId.dischargerId d' }
+                mgr := { mgr with nodes := mgr.nodes.insert dischargerId.vcId vc' }
             -- Refill AFTER recordDischargerResult so freshly woken
             -- alternatives and unlocked dependents can all be scheduled.
             mgr ← fillAvailableSlotsLocked mgr
@@ -213,7 +226,17 @@ private def ensureExistingTheoremMatches (fullName : Name) (statement : Expr) : 
     throwError "cannot generate VC theorem `{fullName}` because a declaration with that name already exists with a different type"
 
 private def addProvenVCTheorem (vc : VerificationCondition VCMetadata SmtResult)
-    (witness : Witness) : CommandElabM Unit := do
+    (witness? : Option Witness)
+    (regen? : Option (CommandElabM Witness)) : CommandElabM Unit := do
+  -- Resolve the witness. ALWAYS prefer the regen closure when present — for
+  -- lazily-regenerated VCs the stored slot holds only a 1-node `sorryAx`
+  -- sentinel. A stored witness is a real proof only on paths without a regen
+  -- closure (e.g. interactive `@[veil]` theorems, where `regen? = none`).
+  let witness ← match regen? with
+    | some regen => regen
+    | none => match witness? with
+      | some w => pure w
+      | none => throwError "no witness and no regeneration closure for VC `{vc.name}`"
   liftTermElabM do
     let fullName := (← getCurrNamespace).append vc.name
     let statement ← vc.toVCStatement.type
@@ -234,7 +257,7 @@ upstream VC theorem constants. -/
 def addProvenTheoremsInDependencyOrder (filter : VCMetadata → Bool) : CommandElabM Unit := do
   let mgr ← vcManager.atomically fun ref => ref.get
   for vcId in mgr.vcIdsInDependencyOrder filter do
-    if let some (vc, witness) := mgr.provenWitness? vcId then
-      addProvenVCTheorem vc witness
+    if let some (vc, (witness?, regen?)) := mgr.provenWitnessOrRegen? vcId then
+      addProvenVCTheorem vc witness? regen?
 
 end Veil.Verifier

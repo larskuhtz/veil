@@ -77,7 +77,28 @@ def VCDischarger.fromTerm (term : Term) (actName : Name) (vcStatement : VCStatem
     if nameSuffix.isEmpty then dischargerId
     else { dischargerId with name := Name.mkSimple s!"{dischargerId.name.getString!}{nameSuffix}" }
   let env0 ← getEnv
-  Discharger.fromTermWith term vcStatement dischargerId ch fun smtCh data time => do
+  -- Snapshot the lazy-witness-regen option at discharger-creation time so the
+  -- async callback (which runs in a snapshot branch) sees a deterministic value
+  -- independent of any later option changes.
+  let lazyRegen := veil.lazyWitnessRegen.get (← getOptions)
+  -- Lazy witness regen closure: re-elaborates `term` against `vcStatement.type`
+  -- and inlines fresh proofs against `env0` (captured here at creation). Small
+  -- (a Term + an Environment ref + a VCStatement); stays attached to the
+  -- Discharger for the lifetime of `_dischargerResults`. `#gen_theorems` invokes
+  -- it to materialize the witness on demand. Built only when
+  -- `veil.lazyWitnessRegen` is enabled; otherwise the full witness is retained
+  -- in the result and no regeneration is needed.
+  let regen? : Option (Lean.Elab.Command.CommandElabM Witness) :=
+    if lazyRegen then some <| do
+      Lean.Elab.Command.liftTermElabM do
+        let witness ← instantiateMVars $ ← withSynthesize (postpone := .no) $
+          withoutErrToSorry $ elabTermEnsuringType term (← vcStatement.type)
+        let witness ← inlineFreshProofs env0 witness
+        if witness.hasMVar || witness.hasFVar || witness.hasSyntheticSorry then
+          throwError "lazy-regen witness for {dischargerId.name} has unresolved metavariables"
+        return witness
+    else none
+  let discharger ← Discharger.fromTermWith term vcStatement dischargerId ch fun smtCh data time => do
     let data : Witness ⊕ Exception ← match data with
       | .inl witness => do
         let witness ← inlineFreshProofs env0 witness
@@ -89,7 +110,26 @@ def VCDischarger.fromTerm (term : Term) (actName : Name) (vcStatement : VCStatem
           throwError "unsolved goals"
         pure (.inl witness)
       | .inr ex => pure (.inr ex)
-    mkDischargerResult dischargerId.name actName smtCh data time
+    let dischargerResult ← mkDischargerResult dischargerId.name actName smtCh data time
+    -- LAZY WITNESS REGEN (gated on `veil.lazyWitnessRegen`, default true):
+    -- replace the (~10 MB) witness with a 1-node sentinel.
+    -- `addProvenVCTheorem` always prefers `Discharger.regenWitness?` over
+    -- the stored slot for VCs that have a regen closure, so the sentinel
+    -- is never used as a real proof — it exists only to preserve the
+    -- `witness.hasSorry` signal that drives the trusted-SMT warning. With
+    -- `veil.smt.trust = true` the real witness contains `sorryAx`; we
+    -- mirror that with a bare `sorryAx` const. With trust off the real
+    -- witness has no sorry; we drop it entirely (sentinel = none).
+    match data, dischargerResult with
+    | .inl witness, .proven _ res t =>
+      if lazyRegen then
+        let sentinel? : Option Witness :=
+          if witness.hasSorry then some (Lean.mkConst ``sorryAx) else none
+        return .proven sentinel? res t
+      else
+        return dischargerResult
+    | _, _ => return dischargerResult
+  return { discharger with regenWitness? := regen? }
 
 /-! ## VC Statement Building -/
 
