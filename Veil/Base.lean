@@ -86,6 +86,11 @@ register_option veil.__modelCheckCompileMode : Bool := {
   descr := "(INTERNAL ONLY. DO NOT USE.) When true, skip verification-only operations for model checking compilation."
 }
 
+register_option veil.gen.modelCheckScaffolding : Bool := {
+  defValue := true
+  descr := "When true (default), generate `FinEncodableInjOnly`/`Enumeration` instances on the action `Label` type (and the ActionTag enum) and assemble the `EnumerableTransitionSystem`. Required for `#model_check`. The derivation is O(n^k) in the number of actions and can blow up Lean elaboration heartbeats for protocols with many actions (~30+). Set to false to skip — `#check_invariants` and `#check_action` remain fully sound and supported; only `#model_check` becomes unavailable."
+}
+
 inductive VeilSolver : Type where
   | smt
   | grind

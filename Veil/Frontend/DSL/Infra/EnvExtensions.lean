@@ -121,6 +121,13 @@ to `true` during that compilation to:
 def isModelCheckCompileMode [Monad m] [MonadOptions m] : m Bool := do
   return veil.__modelCheckCompileMode.get (← getOptions)
 
+/-- Whether model-check scaffolding (FinEncodableInjOnly / Enumeration on
+    `Label`, the ActionTag enum, and the EnumerableTransitionSystem) should be
+    generated. See `veil.gen.modelCheckScaffolding` in `Veil/Base.lean` for the
+    rationale. -/
+def isModelCheckScaffoldingEnabled [Monad m] [MonadOptions m] : m Bool := do
+  return veil.gen.modelCheckScaffolding.get (← getOptions)
+
 /-- Log an error, but only if not in model check compilation mode.
     In compilation mode, errors would cause lake build to fail. -/
 def veilLogError [Monad m] [MonadOptions m] [AddMessageContext m] [MonadLog m]
