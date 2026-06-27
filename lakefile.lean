@@ -91,7 +91,7 @@ target widgetJsAllDev pkg : Unit :=
 @[default_target]
 lean_lib «Veil» {
   globs := #[`Veil, .submodules `Veil]
-  -- precompileModules := true
+  precompileModules := true
   needs := #[widgetJsAll]
 }
 
