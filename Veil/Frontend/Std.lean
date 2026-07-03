@@ -384,6 +384,26 @@ class ByzNodeSet (node : Type) /- (is_byz : outParam (node → Bool)) -/ (nset :
     ∀ (s : nset), supermajority s → greater_than_third s
   greater_than_third_nonempty :
     ∀ (s : nset), greater_than_third s → ¬ is_empty s
+  /-- A supermajority (`≥ 2f+1`) contains an all-honest greater-than-third
+      (`≥ f+1`) subset: at most `f` of its members are Byzantine, and
+      `(2f+1) - f = f+1`. -/
+  supermajority_contains_honest_greater_than_third :
+    ∀ (s : nset), supermajority s →
+      ∃ (t : nset), greater_than_third t ∧
+        ∀ (a : node), member a t → member a s ∧ ¬ is_byz a
+  /-- A supermajority and a greater-than-third set share at least one —
+      possibly Byzantine — member: `(2f+1) + (f+1) - (3f+1) = 1`. -/
+  supermajority_greater_than_third_intersect :
+    ∀ (s1 s2 : nset), supermajority s1 → greater_than_third s2 →
+      ∃ (a : node), member a s1 ∧ member a s2
+  /-- Two supermajorities intersect in a greater-than-third subset:
+      `2(2f+1) - (3f+1) = f+1`. Strengthens
+      `supermajorities_intersect_in_honest`, which only exposes a single
+      honest member of the intersection. -/
+  supermajorities_intersect_in_greater_than_third :
+    ∀ (s1 s2 : nset), supermajority s1 → supermajority s2 →
+      ∃ (t : nset), greater_than_third t ∧
+        ∀ (a : node), member a t → member a s1 ∧ member a s2
 
 /-! ### Instances -/
 
@@ -449,6 +469,20 @@ variable (n f : Nat) (hf : n = 3 * f + 1)
 
 include hbyz
 
+/-- Within any nodup list `s` over `Fin n`, the number of Byzantine elements
+    is at most the global Byzantine count `f`. -/
+private theorem byz_in_list_le (s : List (Fin n)) (hnodup : s.Nodup) :
+    (s.filter (fun a => decide (is_byz a))).length ≤ f := by
+  calc (s.filter (fun a => decide (is_byz a))).length
+      = (s.filter (fun a => decide (is_byz a))).toFinset.card := by
+        rw [List.toFinset_card_of_nodup (List.Nodup.filter _ hnodup)]
+      _ ≤ ((List.ofFn (n := n) id).filter (fun i => decide (is_byz i))).toFinset.card := by
+        apply Finset.card_le_card
+        intro a ha ; simp at ha ⊢ ; exact ha.2
+      _ ≤ ((List.ofFn (n := n) id).filter (fun i => decide (is_byz i))).length :=
+        List.toFinset_card_le _
+      _ ≤ f := hbyz
+
 /-- ByzNodeSet instance for `Fin n` with at most `f` Byzantine nodes.
     Assumes `n = 3 * f + 1` (standard Byzantine fault tolerance assumption). -/
 @[implicit_reducible]
@@ -507,6 +541,51 @@ def byzNodeSetFin : ByzNodeSet (Fin n) (ByzNSet n) where
     intro _ hs ; omega
   greater_than_third_nonempty := by
     intro s hs heq ; simp_all
+  supermajority_contains_honest_greater_than_third := by
+    intro ⟨s, hs_sorted⟩ hsup
+    simp only at hsup
+    refine ⟨⟨s.filter (fun a => !decide (is_byz a)), List.Pairwise.filter _ hs_sorted⟩, ?_, ?_⟩
+    · -- |honest members of s| ≥ (2f+1) - f = f+1
+      show f + 1 ≤ _
+      have hsplit := List.length_eq_length_filter_add (l := s) (fun a => decide (is_byz a))
+      have hb := byz_in_list_le n f is_byz hbyz s (List.Pairwise.nodup hs_sorted)
+      simp only ; omega
+    · intro a ha ; simp only [List.mem_filter] at ha ; simp_all
+  supermajority_greater_than_third_intersect := by
+    intro ⟨s1, hs1_sorted⟩ ⟨s2, hs2_sorted⟩ hsup1 hgtt2
+    simp only at hsup1 hgtt2
+    -- |s1 ∩ s2| ≥ (2f+1) + (f+1) - (3f+1) = 1
+    have hnodup1 := List.Pairwise.nodup hs1_sorted
+    have hnodup2 := List.Pairwise.nodup hs2_sorted
+    have hcard1 : s1.toFinset.card = s1.length := List.toFinset_card_of_nodup hnodup1
+    have hcard2 : s2.toFinset.card = s2.length := List.toFinset_card_of_nodup hnodup2
+    have hinter := Finset.card_inter_add_card_union s1.toFinset s2.toFinset
+    have hunion : (s1.toFinset ∪ s2.toFinset).card ≤ n := by
+      have := Finset.card_le_univ (s1.toFinset ∪ s2.toFinset) ; simpa using this
+    have hne : 0 < (s1.toFinset ∩ s2.toFinset).card := by omega
+    obtain ⟨a, ha⟩ := Finset.card_pos.mp hne
+    rw [Finset.mem_inter, List.mem_toFinset, List.mem_toFinset] at ha
+    exact ⟨a, by simp [ha.1], by simp [ha.2]⟩
+  supermajorities_intersect_in_greater_than_third := by
+    intro ⟨s1, hs1_sorted⟩ ⟨s2, hs2_sorted⟩ hsup1 hsup2
+    simp only at hsup1 hsup2
+    refine ⟨⟨s1.filter (fun a => decide (a ∈ s2)), List.Pairwise.filter _ hs1_sorted⟩, ?_, ?_⟩
+    · -- |s1 ∩ s2| ≥ 2(2f+1) - (3f+1) = f+1
+      show f + 1 ≤ _
+      have hnodup1 := List.Pairwise.nodup hs1_sorted
+      have hnodup2 := List.Pairwise.nodup hs2_sorted
+      have hcard1 : s1.toFinset.card = s1.length := List.toFinset_card_of_nodup hnodup1
+      have hcard2 : s2.toFinset.card = s2.length := List.toFinset_card_of_nodup hnodup2
+      have hinter := Finset.card_inter_add_card_union s1.toFinset s2.toFinset
+      have hunion : (s1.toFinset ∪ s2.toFinset).card ≤ n := by
+        have := Finset.card_le_univ (s1.toFinset ∪ s2.toFinset) ; simpa using this
+      have hfilt : (s1.filter (fun a => decide (a ∈ s2))).length
+          = (s1.toFinset ∩ s2.toFinset).card := by
+        rw [← List.toFinset_card_of_nodup (List.Nodup.filter _ hnodup1)]
+        congr 1
+        ext a ; simp
+      simp only ; omega
+    · intro a ha ; simp only [List.mem_filter] at ha ; simp_all
 
 -- These instances are required, even after setting `byzNodeSetFin` to be `abbrev`
 instance byzNodeSetFin_is_byz_dec :
