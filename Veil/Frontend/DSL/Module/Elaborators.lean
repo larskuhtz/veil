@@ -249,6 +249,37 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
         logWarning m!"unable to generate transition weakening lemma: {ex.toMessageData}"
   pure mod
 
+/-- Solver-relevant options as (name, value) pairs. Used to detect when a
+check command runs under different solver options than the VCs' dischargers
+captured at `#gen_spec` (see `Verifier.solverOptionsAtVCGen`). -/
+private def solverRelevantOptionValues (opts : Options) : Array (String × String) := #[
+  ("veil.solver", toString (veil.solver.get opts)),
+  ("veil.smt.timeout", toString (veil.smt.timeout.get opts)),
+  ("veil.smt.finiteModelFind", toString (veil.smt.finiteModelFind.get opts)),
+  ("veil.smt.trust", toString (veil.smt.trust.get opts)),
+  ("veil.smt.seed", toString (veil.smt.seed.get opts)),
+  ("veil.smt.retries", toString (veil.smt.retries.get opts)),
+  ("veil.smt.retryTimeout", toString (veil.smt.retryTimeout.get opts))]
+
+/-- Warn when solver options in scope at a check command differ from those
+captured when the VCs were generated. Dischargers elaborate their proof terms
+in the `#gen_spec`-time context, so `set_option veil.smt.* ... in
+#check_invariants` silently does not affect solving — a classic footgun
+(e.g. believing a sweep runs with a 900 s timeout while it actually uses the
+default 60 s). -/
+private def warnIfSolverOptionsChangedSinceVCGen (stx : Syntax) (mod : Module) : CommandElabM Unit := do
+  let some (genModule, genVals) ← Verifier.solverOptionsAtVCGen.get | return
+  unless genModule == mod.name do return
+  let curVals := solverRelevantOptionValues (← getOptions)
+  let changed := curVals.zip genVals |>.filter fun ((_, cur), (_, gen)) => cur != gen
+  unless changed.isEmpty do
+    let list := ", ".intercalate <| changed.toList.map
+      fun ((n, cur), (_, gen)) => s!"`{n}` (in scope here: {cur}; at VC generation: {gen})"
+    logWarningAt stx m!"solver option(s) differ from the values captured when the \
+      verification conditions were generated: {list}. Dischargers capture solver \
+      options at `#gen_spec`, so values set only around this command do NOT \
+      affect solving — set them before `#gen_spec` instead."
+
 /-- Report a failure to build the local pre-simplification infrastructure at
 `#gen_spec`. By default (`veil.gen.strictLocalSimp`) this is a hard error:
 continuing means every VC re-simplifies the full assembled assertion clump,
@@ -378,6 +409,7 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
     -- Run doesNotThrow VCs asynchronously and log errors at assertion locations when done
     Verifier.runFilteredAsync Verifier.isDoesNotThrow logDoesNotThrowErrors
     mod.generateInvariantVCs
+    Verifier.solverOptionsAtVCGen.set (some (mod.name, solverRelevantOptionValues (← getOptions)))
   -- Invariant VCs are generated here; verifier commands decide when to start them.
   return { mod with _specFinalizedAt := some stx }
 
@@ -438,6 +470,7 @@ private def runFilteredInvariantCheck
     (mod : Module)
     (filter : VCMetadata → Bool)
     : CommandElabM Unit := do
+  warnIfSolverOptionsChangedSinceVCGen stx mod
   Verifier.runFilteredAsync filter (logVerificationResults stx)
   Verifier.displayStreamingResults stx
     (Verifier.vcManager.atomically fun ref => do
