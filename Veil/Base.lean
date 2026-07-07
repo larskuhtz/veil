@@ -169,6 +169,19 @@ register_option veil.smt.retryTimeout : Nat := {
   Must be set before `#gen_spec`."
 }
 
+register_option veil.gen.strictLocalSimp : Bool := {
+  defValue := true
+  descr := "If true (default), failing to synthesize the local \
+  pre-simplification infrastructure (LocalTheoryProp/LocalRProp simplified \
+  cores and the local `meetsSpecificationIfSuccessful` theorems) at \
+  `#gen_spec` is a hard error. Without this infrastructure every VC \
+  re-simplifies the full assembled assertion clump from scratch, silently \
+  degrading `#check_invariants` roughly 10x on large modules; the failure is \
+  usually instance-search budget exhaustion, fixed by raising \
+  `synthInstance.maxHeartbeats`/`synthInstance.maxSize`/`maxRecDepth`. \
+  Set to false to restore the old warn-and-continue behavior."
+}
+
 register_option veil.report.slowVCs : Nat := {
   defValue := 10
   descr := "Number of slowest verification conditions to list at the end of \
