@@ -878,7 +878,19 @@ private def mkVeilSmtTactic : TacticM (TSyntax `tactic) := do
   let fmfValue := if fmfEnabled then "true" else "false"
   let trustValue := mkIdent <| if trustEnabled then ``true else ``false
   let trustValueNegated := mkIdent <| if trustEnabled then ``false else ``true
-  let solverOptions ← `(term| [("finite-model-find", $(Syntax.mkStrLit fmfValue)), ("nl-ext-tplanes", "true"), ("enum-inst-interleave", "true")])
+  let mut solverOptionEntries := #[
+    ← `(term| ("finite-model-find", $(Syntax.mkStrLit fmfValue))),
+    ← `(term| ("nl-ext-tplanes", "true")),
+    ← `(term| ("enum-inst-interleave", "true"))]
+  -- Seed 0 means "don't pass a seed": the primary attempt's query stays
+  -- bit-identical to the seedless configuration; retries perturb it.
+  let seed := veil.smt.seed.get opts
+  if seed != 0 then
+    let seedLit := Syntax.mkStrLit (toString seed)
+    solverOptionEntries := solverOptionEntries ++ #[
+      ← `(term| ("seed", $seedLit)),
+      ← `(term| ("sat-random-seed", $seedLit))]
+  let solverOptions ← `(term| [$solverOptionEntries,*])
   let smtTac ← `(tactic| smt ($(mkIdent `config):ident := {$(mkIdent `trust):ident := $trustValue:ident, $(mkIdent `embedBool):ident := $trustValueNegated:ident, $(mkIdent `model):ident := $(mkIdent ``true), $(mkIdent `timeout):ident := $(mkIdent ``Option.some) $(quote timeout), $(mkIdent `extraSolverOptions):ident := $solverOptions}) [$[$idents:ident],*])
   if trustEnabled then
     return ← `(tactic| open $(mkIdent `Classical):ident in $smtTac:tactic)
