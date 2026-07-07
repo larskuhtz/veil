@@ -249,6 +249,30 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
         logWarning m!"unable to generate transition weakening lemma: {ex.toMessageData}"
   pure mod
 
+/-- Report a failure to build the local pre-simplification infrastructure at
+`#gen_spec`. By default (`veil.gen.strictLocalSimp`) this is a hard error:
+continuing means every VC re-simplifies the full assembled assertion clump,
+degrading `#check_invariants` roughly 10x — and the failure mode (instance
+search running out of budget) occurs precisely when the model grows large
+enough for the degradation to hurt. -/
+private def reportLocalSimpFailure (stx : Syntax) (what : MessageData)
+    (ex : Exception) : CommandElabM Unit := do
+  let msg := m!"unable to {what}: {ex.toMessageData}\n\n\
+    Without it, every verification condition re-simplifies the full assembled \
+    assertion clump from scratch, degrading `#check_invariants` roughly 10x \
+    on large modules. This failure is usually instance-search budget \
+    exhaustion on a large assertion clump; raise the budgets before the \
+    failing declaration (and before `#gen_spec`):\n\n  \
+    set_option synthInstance.maxHeartbeats 2000000\n  \
+    set_option synthInstance.maxSize 4096\n  \
+    set_option maxRecDepth 8192\n\n\
+    Alternatively, `set_option veil.gen.strictLocalSimp false` downgrades \
+    this error to a warning (accepting the degraded performance)."
+  if veil.gen.strictLocalSimp.get (← getOptions) then
+    throwErrorAt stx msg
+  else
+    logWarningAt stx msg
+
 private def warnIfNoInvariantsDefined (mod : Module) : CommandElabM Unit := do
   if mod.invariants.isEmpty then
     logWarning "you have not defined any invariants for this specification; did you forget?"
@@ -282,7 +306,8 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
       try
         liftTermElabM $ mod.simplifyLocalTheoryPropCore assembledAssumptionsName
       catch ex =>
-        logWarningAt assumptionCmd m!"unable to synthesize LocalTheoryProp simplified core for {assembledAssumptionsName}: {ex.toMessageData}"
+        reportLocalSimpFailure assumptionCmd
+          m!"synthesize LocalTheoryProp simplified core for {assembledAssumptionsName}" ex
       return mod
     let mod ← withTraceNode `veil.perf.elaborator.decl.Invariants (fun _ => return "Invariants") do
       let (invariantCmd, mod) ← mod.assembleInvariants
@@ -292,18 +317,21 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
         try
           liftTermElabM $ mod.simplifyLocalRPropCore assembledInvariantsName
         catch ex =>
-          logWarningAt invariantCmd m!"unable to synthesize LocalRProp instance for {assembledInvariantsName}: {ex.toMessageData}"
+          reportLocalSimpFailure invariantCmd
+            m!"synthesize LocalRProp instance for {assembledInvariantsName}" ex
       if !mod.invariants.isEmpty then
         try
           let localMeetsCmd ← liftTermElabM mod.defineMeetsSpecificationIfSuccessfulAssumingLocalTheorem
           elabVeilCommand localMeetsCmd
         catch ex =>
-          logWarningAt invariantCmd m!"unable to define {localMeetsSpecificationIfSuccessfulAssumingName}: {ex.toMessageData}"
+          reportLocalSimpFailure invariantCmd
+            m!"define {localMeetsSpecificationIfSuccessfulAssumingName}" ex
         try
           let localTrMeetsCmd ← liftTermElabM mod.defineTransitionMeetsSpecificationIfSuccessfulAssumingLocalTheorem
           elabVeilCommand localTrMeetsCmd
         catch ex =>
-          logWarningAt invariantCmd m!"unable to define {localTransitionMeetsSpecificationIfSuccessfulAssumingName}: {ex.toMessageData}"
+          reportLocalSimpFailure invariantCmd
+            m!"define {localTransitionMeetsSpecificationIfSuccessfulAssumingName}" ex
       return mod
     let mod ← withTraceNode `veil.perf.elaborator.decl.Safeties (fun _ => return "Safeties") do
       let (safetyCmd, mod) ← mod.assembleSafeties
