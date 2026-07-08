@@ -217,6 +217,19 @@ register_option veil.report.nearTimeoutPercent : Nat := {
   model change (e.g. one added invariant) may push them past the timeout."
 }
 
+register_option veil.report.witnessSizes : Bool := {
+  defValue := false
+  descr := "If true, measure the heap size (DAG-aware object count, \
+  `Lean.Expr.numObjs`) of every successful discharger's proof witness and \
+  append a summary report to the verification results. Diagnostic \
+  instrumentation for the witness-size blowup of large modules (each WP \
+  witness embeds the full normalisation chain of its action against the \
+  assembled invariant clump); off by default so command output stays \
+  deterministic. The registry is cumulative per Lean module elaboration; \
+  when several check commands run in one module, later measurements of the \
+  same discharger win."
+}
+
 register_option veil.experimental.wpCompact : Bool := {
   defValue := true
   descr := "Experimental. If true, compact generated `wp_local_eq.pred` definitions by sharing duplicated postcondition branches with `letEq` and exposing abstract-state conditionals field-wise."
@@ -232,6 +245,22 @@ register_option veil.lazyWitnessRegen : Bool := {
   (the pre-2026-06-10 behavior); useful for debugging regen behavior or when \
   `#gen_theorems` is called repeatedly on the same VCs and the per-call regen \
   cost dominates the memory savings."
+}
+
+register_option veil.gen.trustedTheoremStubs : Bool := {
+  defValue := true
+  descr := "If true (default), `#gen_theorems` persists a VC theorem whose \
+  discharge was trusted-SMT-based (`veil.smt.trust = true`, witness contains \
+  `sorryAx`) as a direct `sorryAx` of the VC statement, instead of \
+  re-elaborating the discharger (lazy witness regeneration — a second, \
+  serial SMT run per VC) or retaining the full `Eq.mpr` normalisation chain \
+  (~100 KB–10 MB per VC). The trust base is unchanged — the chain's leaf is \
+  the same axiom — but memory and olean cost become O(statement) per \
+  theorem, which is what lets `#gen_theorems` scale to large modules under \
+  trust mode. Proof-reconstruction runs (`veil.smt.trust = false`) are \
+  unaffected: their witnesses contain no `sorryAx` and are materialised in \
+  full as before. Set to false to restore the previous behavior (full \
+  witness even under trust mode)."
 }
 
 end Veil
