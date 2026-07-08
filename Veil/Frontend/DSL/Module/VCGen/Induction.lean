@@ -88,6 +88,8 @@ def VCDischarger.fromTerm (term : Term) (actName : Name) (vcStatement : VCStatem
   -- async callback (which runs in a snapshot branch) sees a deterministic value
   -- independent of any later option changes.
   let lazyRegen := veil.lazyWitnessRegen.get (← getOptions)
+  -- Same snapshot discipline for the witness-size instrumentation.
+  let measureWitness := veil.report.witnessSizes.get (← getOptions)
   -- Lazy witness regen closure: re-elaborates `term` against `vcStatement.type`
   -- and inlines fresh proofs against `env0` (captured here at creation). Small
   -- (a Term + an Environment ref + a VCStatement); stays attached to the
@@ -115,6 +117,11 @@ def VCDischarger.fromTerm (term : Term) (actName : Name) (vcStatement : VCStatem
         -- tactic still failed, and the fallback error result is published.
         if witness.hasMVar || witness.hasFVar || witness.hasSyntheticSorry then
           throwError "unsolved goals"
+        -- Witness-size instrumentation (`veil.report.witnessSizes`):
+        -- measure here, where the full witness exists regardless of
+        -- `veil.lazyWitnessRegen` (it is sentinel-ized below).
+        if measureWitness then
+          Verifier.recordWitnessSize dischargerId.name witness
         pure (.inl witness)
       | .inr ex => pure (.inr ex)
     let dischargerResult ← mkDischargerResult dischargerId.name actName smtCh data time

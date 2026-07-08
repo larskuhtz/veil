@@ -399,8 +399,32 @@ private def formatSlowVCsReport [Monad m] [MonadOptions m]
     msg := msg ++ m!"  {formatMs time}  {name}{flag}\n"
   return some msg
 
+/-- Format the witness-size report (`veil.report.witnessSizes`): aggregate
+statistics plus the largest witnesses, from the sizes the dischargers
+recorded in `Verifier.witnessSizeRegistry`. Entries are deduplicated by
+discharger name (later measurements win). Off by default. -/
+private def formatWitnessSizesReport [Monad m] [MonadOptions m] [MonadLiftT BaseIO m] :
+    m (Option MessageData) := do
+  unless veil.report.witnessSizes.get (← getOptions) do return none
+  let entries ← (witnessSizeRegistry.get : BaseIO _)
+  if entries.isEmpty then return none
+  let deduped := entries.foldl (init := (∅ : Std.HashMap Name WitnessSizeEntry))
+    fun acc e => acc.insert e.discharger e
+  let entries := deduped.valuesArray
+  let total := entries.foldl (init := 0) (· + ·.numObjs)
+  let sorted := entries.qsort (fun a b => a.numObjs > b.numObjs)
+  let topN := sorted.take 10
+  let mut msg := m!"Witness sizes (heap objects, DAG-aware; \
+    {entries.size} witnesses, total {total}, mean {total / entries.size}, \
+    top {topN.size}):\n"
+  for e in topN do
+    let flag := if e.trusted then " (trusted leaf)" else " (reconstructed)"
+    msg := msg ++ m!"  {e.numObjs}  {e.discharger}{flag}\n"
+  return some msg
+
 /-- Format verification results as text output for logging. -/
-def formatVerificationResults [Monad m] [MonadOptions m](results : VerificationResults VCMetadata SmtResult) : m MessageData := do
+def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
+    (results : VerificationResults VCMetadata SmtResult) : m MessageData := do
   let includeCounterexamples := veil.printCounterexamples.get (← getOptions)
   let vcs := results.vcs.filter fun vc =>
     vc.metadata.isInduction && !vc.isDormant && vc.alternativeFor.isNone
@@ -438,6 +462,8 @@ def formatVerificationResults [Monad m] [MonadOptions m](results : VerificationR
           msg := msg ++ diagnosticMsg
   if let some slowMsg ← formatSlowVCsReport results then
     msg := msg ++ slowMsg
+  if let some sizeMsg ← formatWitnessSizesReport then
+    msg := msg ++ sizeMsg
   return msg
 
 /-- Check if any VCs have non-proven status. -/

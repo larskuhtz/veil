@@ -227,6 +227,31 @@ def waitFilteredSync (filter : VCMetadata → Bool) : CommandElabM (Verification
   startFiltered filter
   awaitFilteredWithLogging filter
 
+/-! ## Witness-size instrumentation (`veil.report.witnessSizes`) -/
+
+/-- One measured proof witness: the discharger that produced it, its heap
+object count (DAG-aware, `Lean.Expr.numObjs`), and whether it is
+trusted-SMT-based (contains `sorryAx`). -/
+structure WitnessSizeEntry where
+  discharger : Name
+  numObjs : Nat
+  trusted : Bool
+deriving Inhabited
+
+/-- Global registry of measured witness sizes, filled by dischargers when
+`veil.report.witnessSizes` is enabled and read by the verification-results
+report. Cumulative per Lean module elaboration; the report deduplicates by
+discharger name (later entries win). -/
+initialize witnessSizeRegistry : IO.Ref (Array WitnessSizeEntry) ← IO.mkRef #[]
+
+/-- Measure `witness` and record it in `witnessSizeRegistry`. Called by
+dischargers right after witness elaboration — the only point where the full
+witness exists regardless of `veil.lazyWitnessRegen`. -/
+def recordWitnessSize (discharger : Name) (witness : Expr) : IO Unit := do
+  let n ← witness.numObjs
+  witnessSizeRegistry.modify
+    (·.push { discharger := discharger, numObjs := n, trusted := witness.hasSorry })
+
 private def ensureExistingTheoremMatches (fullName : Name) (statement : Expr) : TermElabM Unit := do
   let some info := (← getEnv).find? fullName
     | return
@@ -236,22 +261,40 @@ private def ensureExistingTheoremMatches (fullName : Name) (statement : Expr) : 
 private def addProvenVCTheorem (vc : VerificationCondition VCMetadata SmtResult)
     (witness? : Option Witness)
     (regen? : Option (CommandElabM Witness)) : CommandElabM Unit := do
+  -- TRUSTED-STUB FAST PATH (`veil.gen.trustedTheoremStubs`, default true).
+  -- When the discharge was trusted-SMT-based, the stored witness slot carries
+  -- `sorryAx` — under lazy regen it is exactly the 1-node sentinel, and
+  -- without lazy regen it is the full `Eq.mpr` normalisation chain whose
+  -- *leaf* is the axiom. Either way the real proof's trust base is the
+  -- trusted axiom, so persisting `sorryAx <statement>` directly is
+  -- trust-equivalent — and skips both failure modes of witness
+  -- materialisation at scale: the serial re-elaboration of the regen
+  -- closure (a second SMT run per VC) and the O(action × clump) chain in
+  -- memory/olean. Reconstruction runs (`veil.smt.trust = false`) never take
+  -- this path: their witnesses contain no `sorryAx`.
+  let useTrustedStub :=
+    veil.gen.trustedTheoremStubs.get (← getOptions) && witness?.any (·.hasSorry)
   -- Resolve the witness. ALWAYS prefer the regen closure when present — for
   -- lazily-regenerated VCs the stored slot holds only a 1-node `sorryAx`
   -- sentinel. A stored witness is a real proof only on paths without a regen
   -- closure (e.g. interactive `@[veil]` theorems, where `regen? = none`).
-  let witness ← match regen? with
-    | some regen => regen
-    | none => match witness? with
-      | some w => pure w
-      | none => throwError "no witness and no regeneration closure for VC `{vc.name}`"
+  let witness? : Option Witness ←
+    if useTrustedStub then
+      pure none  -- constructed below, from the statement
+    else some <$> match regen? with
+      | some regen => regen
+      | none => match witness? with
+        | some w => pure w
+        | none => throwError "no witness and no regeneration closure for VC `{vc.name}`"
   liftTermElabM do
     let fullName := (← getCurrNamespace).append vc.name
     let statement ← vc.toVCStatement.type
     if (← getEnv).contains fullName then
       ensureExistingTheoremMatches fullName statement
       return
-    let witness ← instantiateMVars witness
+    let witness ← match witness? with
+      | some w => instantiateMVars w
+      | none => Meta.mkSorry statement (synthetic := false)
     let _ ← addVeilTheorem vc.name statement witness
     return ()
 
