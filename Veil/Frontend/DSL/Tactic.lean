@@ -938,14 +938,38 @@ def elabVeilWp : DesugarTacticM Unit := veilWithMainContext do
   let tac ← `(tactic| open $(mkIdent `Classical):ident in veil_simp only [$(mkIdent `wpSimp):ident, $(mkIdent `loomLogicSimpForVeil):ident])
   veilEvalTactic tac
 
-private def mkTrueLocalRPropComponents [Monad m] [MonadQuotation m] (mod : Module) : m (Term × Term) := do
+/-- The immutable/mutable state-component names of the Veil module that
+declared `declName` (an action/transition constant from a VC goal).
+In-module this is the frontend's module state, exactly as before. Cross-file
+— e.g. a file that imports the module and re-proves its VC statements —
+that state does not exist (`veil module` state is file-local and
+does not survive imports), so the names are recovered from the generated
+`Theory`/`State` structures, whose fields are exactly the immutable/mutable
+components in declaration order. Everything else the local-bridge tactics
+need is already derived from the goal or resolved through the module's
+namespace (cross-file callers must `open` it anyway for the module-relative
+names the discharge tactics build). -/
+private def moduleComponentNames (declName : Name) : DesugarTacticM (Array Name × Array Name) := do
+  if let some mod := (← localEnv.get).currentModule then
+    return (mod.immutableComponents.map (·.name), mod.mutableComponents.map (·.name))
+  let env ← getEnv
+  let mut ns := declName.getPrefix
+  while ns != Name.anonymous do
+    if isStructure env (ns ++ `Theory) && isStructure env (ns ++ `State) then
+      return (getStructureFields env (ns ++ `Theory), getStructureFields env (ns ++ `State))
+    ns := ns.getPrefix
+  throwError "could not determine the Veil module of {declName}: no file-local \
+    module state, and no prefix namespace of {declName} has generated \
+    `Theory`/`State` structures"
+
+private def mkTrueLocalRPropComponents [Monad m] [MonadQuotation m] (numFields : Nat) : m (Term × Term) := do
   let hole ← `(Lean.Parser.Term.funBinder| _ )
-  let fieldBinders := Array.replicate (mod.immutableComponents.size + mod.mutableComponents.size) hole
+  let fieldBinders := Array.replicate numFields hole
   let trueCore ← mkFunSyntax fieldBinders <| mkIdent ``True
   let rflLocalEq ← `(term| fun _ _ => $(mkIdent ``rfl))
   return (trueCore, rflLocalEq)
 
-private def mkLocalPreconditionTactics (mod : Module) (theoryType stateType pre : Expr)
+private def mkLocalPreconditionTactics (numFields : Nat) (theoryType stateType pre : Expr)
     (tacticName : String) : DesugarTacticM (Option (TSyntax `tactic) × TSyntax `tactic) := do
   let invariantsEqName ← resolveGlobalConstNoOverloadCore <| toCoreSimplifiedEqName assembledInvariantsName
   let invariantsName ← resolveGlobalConstNoOverloadCore assembledInvariantsName
@@ -963,7 +987,7 @@ private def mkLocalPreconditionTactics (mod : Module) (theoryType stateType pre 
     -- field-level core directly instead of asking Lean to infer a shared
     -- definition's module/typeclass prefix while bridge theorem arguments are
     -- still metavariables.
-    let (truePreCore, rflLocalEq) ← mkTrueLocalRPropComponents mod
+    let (truePreCore, rflLocalEq) ← mkTrueLocalRPropComponents numFields
     pure (some (← `(tactic| exact $truePreCore:term)), ← `(tactic| exact $rflLocalEq:term))
   else
     throwError "{tacticName}: expected precondition to be Invariants or True, got{indentExpr pre}"
@@ -978,9 +1002,8 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
   -- provide the small side-condition terms.  The large VC pieces
   -- (`act/assu/pre/post`) are implicit theorem arguments and are recovered from
   -- the expected target instead of being rebuilt as one giant application.
-  let mod ← getCurrentModule
   let goal ← getMainGoal
-  let (actName, wpLocalEqName, preCoreTac?, hPreTac, handlerTerm, postIsTrue) ← goal.withContext do
+  let (actName, wpLocalEqName, immutNames, mutNames, preCoreTac?, hPreTac, handlerTerm, postIsTrue) ← goal.withContext do
     let target ← instantiateMVars (← goal.getType)
     let target := target.consumeMData
     -- After introducing action parameters, the goal should be one of the
@@ -1009,8 +1032,9 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
     let some actName := act.getAppFn'.constName?
       | throwError "veil_apply_local_wp: expected action to be headed by a constant, got{indentExpr act}"
     let wpLocalEqName ← resolveGlobalConstNoOverloadCore (toWpLocalEqName actName)
-    let (preCoreTac?, hPreTac) ← mkLocalPreconditionTactics mod theoryType stateType pre "veil_apply_local_wp"
-    pure (actName, wpLocalEqName, preCoreTac?, hPreTac, handlerTerm, postIsTrue)
+    let (immutNames, mutNames) ← moduleComponentNames actName
+    let (preCoreTac?, hPreTac) ← mkLocalPreconditionTactics (immutNames.size + mutNames.size) theoryType stateType pre "veil_apply_local_wp"
+    pure (actName, wpLocalEqName, immutNames, mutNames, preCoreTac?, hPreTac, handlerTerm, postIsTrue)
   -- NOTE: We intentionally use a lightly-applied `refine` here rather than
   -- building a fully-instantiated theorem application.  On larger modules,
   -- constructing the complete application forces Lean to elaborate huge VC
@@ -1027,7 +1051,7 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
     | none => `(tactic| skip)
   let truePostTerm ← `(term| fun _ _ => $(mkIdent ``True))
   let truePostInst? ← if postIsTrue then
-      let (trueCore, rflLocalEq) ← mkTrueLocalRPropComponents mod
+      let (trueCore, rflLocalEq) ← mkTrueLocalRPropComponents (immutNames.size + mutNames.size)
       pure <| some <| ← `(term| ⟨$trueCore:term, $rflLocalEq:term⟩)
     else pure none
   let hWpTac ← do
@@ -1060,8 +1084,8 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
   -- fields rather than projections.  The final two hypotheses keep the usual
   -- names expected by the local WP solver.
   let introNames :=
-    (mod.immutableComponents.map (fun sc => Name.append `th sc.name)) ++
-    (mod.mutableComponents.map (fun sc => Name.append `st sc.name)) ++
+    (immutNames.map (fun n => Name.append `th n)) ++
+    (mutNames.map (fun n => Name.append `st n)) ++
     #[`has, `hinv]
   let introIdents := introNames.map Lean.mkIdent
   veilEvalTactic $ ← `(tactic| unhygienic intro $introIdents*)
@@ -1085,9 +1109,8 @@ def elabVeilApplyLocalTr : DesugarTacticM Unit := veilWithMainContext do
   -- Match `veil_apply_local_wp`: first expose explicit action parameters so the
   -- remaining target is the public TR VC.
   veilEvalTactic $ ← `(tactic| unhygienic intros)
-  let mod ← getCurrentModule
   let goal ← getMainGoal
-  let (trName, trAbstractName, preCoreTac?, hPreTac) ← goal.withContext do
+  let (trName, trAbstractName, immutNames, mutNames, preCoreTac?, hPreTac) ← goal.withContext do
     let target ← instantiateMVars (← goal.getType)
     let target := target.consumeMData
     let (theoryType, stateType, tr, pre) ←
@@ -1099,8 +1122,9 @@ def elabVeilApplyLocalTr : DesugarTacticM Unit := veilWithMainContext do
     let some trName := tr.getAppFn'.constName?
       | throwError "veil_apply_local_tr: expected transition to be headed by a constant, got{indentExpr tr}"
     let trAbstractName ← resolveTransitionAbstractName trName
-    let (preCoreTac?, hPreTac) ← mkLocalPreconditionTactics mod theoryType stateType pre "veil_apply_local_tr"
-    pure (trName, trAbstractName, preCoreTac?, hPreTac)
+    let (immutNames, mutNames) ← moduleComponentNames trName
+    let (preCoreTac?, hPreTac) ← mkLocalPreconditionTactics (immutNames.size + mutNames.size) theoryType stateType pre "veil_apply_local_tr"
+    pure (trName, trAbstractName, immutNames, mutNames, preCoreTac?, hPreTac)
   -- The theorem shape mirrors the WP bridge theorem.  The bracketed
   -- `<;> [...]` block exposes the fixed side-goal order in the generated
   -- tactic script.  The implicit `trAbs` argument is deliberately left open;
@@ -1128,10 +1152,10 @@ def elabVeilApplyLocalTr : DesugarTacticM Unit := veilWithMainContext do
   -- Keep names close to the old concretization convention for counterexample
   -- display and for downstream local tactics.
   let introNames :=
-    (mod.immutableComponents.map (fun sc => Name.append `th sc.name)) ++
-    (mod.mutableComponents.map (fun sc => Name.append `st sc.name)) ++
+    (immutNames.map (fun n => Name.append `th n)) ++
+    (mutNames.map (fun n => Name.append `st n)) ++
     -- FIXME: Use better name than `s₁`
-    (mod.mutableComponents.map (fun sc => Name.append `s₁ sc.name)) ++
+    (mutNames.map (fun n => Name.append `s₁ n)) ++
     #[`has, `hinv, `htr]
   let introIdents := introNames.map Lean.mkIdent
   veilEvalTactic $ ← `(tactic| unhygienic intro $introIdents*)
