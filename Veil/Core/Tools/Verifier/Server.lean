@@ -179,27 +179,243 @@ def runManager (cancelTk? : Option IO.CancelToken := none) : CommandElabM Unit :
     ref.set true
   )
 
-/-- Log any pending discharger tasks from the channel via `logSnapshotTask` (non-blocking). -/
+/-- Demote error-severity diagnostics in a discharger's snapshot tree to
+information severity, recursively through child snapshots (lean-smt's async
+solver machinery registers tasks as children of the discharger's snapshot and
+logs its failures there — e.g. "unable to prove goal … Reason: TIMEOUT" —
+which is why demoting the discharger callback's own message log was never
+enough).
+
+Rationale: a discharger is one *attempt* at a VC. Its outcome is routed
+through the manager as a `DischargerResult` and aggregated into the VC's
+effective status ("conclusive outcomes win over sibling errors"), which the
+check command's results display reports — with error severity — exactly when
+the VC *effectively* failed. The raw attempt diagnostics are therefore
+redundant, and worse: an error-severity message from a failed attempt whose
+VC was covered by a sibling (seed retry, WP/TR alternative form) reddens an
+otherwise-green build, positioned confusingly at `#gen_spec` (where the
+discharger's snapshot context was captured). Demoting — not dropping — keeps
+the text available for debugging without failing green builds. -/
+private partial def sanitizeDischargerSnapshotTree (t : Language.SnapshotTree) :
+    BaseIO Language.SnapshotTree := do
+  let demote (msg : Message) : Message :=
+    if msg.severity == .error then { msg with severity := .information } else msg
+  let msgLog := t.element.diagnostics.msgLog
+  let msgLog := { msgLog with
+    reported := msgLog.reported.map demote
+    unreported := msgLog.unreported.map demote }
+  let diagnostics ← Language.Snapshot.Diagnostics.ofMessageLog msgLog
+  let children ← t.children.mapM fun child => do
+    return { child with task := (← BaseIO.mapTask sanitizeDischargerSnapshotTree child.task) }
+  return { t with element := { t.element with diagnostics }, children }
+
+/-- Log any pending discharger tasks from the channel via `logSnapshotTask`
+(non-blocking). The tree is routed through `sanitizeDischargerSnapshotTree`
+asynchronously (never blocking registration on discharger completion); the
+cancellation token still reaches the *original* task. Note this is the single
+registration site for discharger tasks — the model-check compilation tasks
+and the results-display callback (`runFilteredAsync`) are registered
+elsewhere and deliberately keep their error severities. -/
 private partial def logPendingDischargerTasks : CommandElabM Unit := do
   if let some info ← Veil.taskRegistrationCh.tryRecv then
-    Command.logSnapshotTask { stx? := none, cancelTk? := info.cancelTk, task := info.task }
+    let sanitized ← BaseIO.mapTask sanitizeDischargerSnapshotTree info.task
+    Command.logSnapshotTask { stx? := none, cancelTk? := info.cancelTk, task := sanitized }
     logPendingDischargerTasks
+
+private def ensureExistingTheoremMatches (fullName : Name) (statement : Expr) : TermElabM Unit := do
+  let some info := (← getEnv).find? fullName
+    | return
+  unless ← Meta.isDefEq info.type statement do
+    throwError "cannot generate VC theorem `{fullName}` because a declaration with that name already exists with a different type"
+
+/-- Cross-witness structural-sharing state for theorem persistence. The
+per-VC proof witnesses are ~95 % identical clump-normalisation chains, but
+each was elaborated in its own discharger task, so consecutive witnesses are
+almost entirely *structurally* equal while sharing almost nothing
+*physically*. Sharing each witness against this accumulated state before
+`addDecl` collapses that duplication in memory — the environment holds every
+persisted proof until olean serialization, which at reconstruction scale
+(~3 800 × ~85 K-object witnesses ≈ 15 GB unshared) is otherwise the peak-
+memory driver of `#gen_theorems` — and in olean size. Only ever touched from
+the command-elaboration thread (`addProvenVCTheorem`). Reset when a
+persistence-enabled await begins, so state never leaks across manager
+generations. -/
+initialize witnessShareState : IO.Ref (ShareCommon.State Lean.ShareCommon.objectFactory) ←
+  IO.mkRef default
+
+private def addProvenVCTheorem (vc : VerificationCondition VCMetadata SmtResult)
+    (witness? : Option Witness)
+    (regen? : Option (CommandElabM Witness)) : CommandElabM Unit := do
+  -- IDEMPOTENCE FAST PATH: if the theorem constant already exists — persisted
+  -- incrementally by `persistProvenIncrementally` while the sweep was running,
+  -- or `#gen_theorems` invoked twice — verify the statement matches and return
+  -- WITHOUT resolving the witness: resolution may run the regen closure, a
+  -- full re-elaboration (SMT query included) per VC.
+  let fullName := (← getCurrNamespace).append vc.name
+  if (← getEnv).contains fullName then
+    liftTermElabM do ensureExistingTheoremMatches fullName (← vc.toVCStatement.type)
+    return
+  -- TRUSTED-STUB FAST PATH (`veil.gen.trustedTheoremStubs`, default true).
+  -- When the discharge was trusted-SMT-based, the stored witness slot carries
+  -- `sorryAx` — under lazy regen it is exactly the 1-node sentinel, and
+  -- without lazy regen it is the full `Eq.mpr` normalisation chain whose
+  -- *leaf* is the axiom. Either way the real proof's trust base is the
+  -- trusted axiom, so persisting `sorryAx <statement>` directly is
+  -- trust-equivalent — and skips both failure modes of witness
+  -- materialisation at scale: the serial re-elaboration of the regen
+  -- closure (a second SMT run per VC) and the O(action × clump) chain in
+  -- memory/olean. Reconstruction runs (`veil.smt.trust = false`) never take
+  -- this path: their witnesses contain no `sorryAx`.
+  let statementOnly := veil.gen.statementOnlyTheorems.get (← getOptions)
+  let useTrustedStub :=
+    statementOnly ||
+    (veil.gen.trustedTheoremStubs.get (← getOptions) && witness?.any (·.hasSorry))
+  -- Resolve the witness. A *sorry-free* stored witness is a real proof (eager
+  -- retention, streaming persistence, or an interactive `@[veil]` theorem) —
+  -- use it directly, never re-elaborate. A stored witness containing `sorryAx`
+  -- is either the 1-node lazy-regen sentinel (regen closure present:
+  -- materialise the real witness) or a full eager trust-mode chain (no regen
+  -- closure: the chain itself is the proof).
+  let witness? : Option Witness ←
+    if useTrustedStub then
+      pure none  -- constructed below, from the statement
+    else some <$> match witness?, regen? with
+      | some w, some regen => if w.hasSorry then regen else pure w
+      | some w, none => pure w
+      | none, some regen => regen
+      | none, none => throwError "no witness and no regeneration closure for VC `{vc.name}`"
+  -- Under `veil.gen.statementOnlyTheorems` every stub is a deliberate,
+  -- option-gated choice: a per-declaration "declaration uses `sorry`"
+  -- warning ×N (thousands of lines on a ~3800-VC module) is pure noise, and the batch
+  -- pass logs one summary instead. `veil.gen.trustedTheoremStubs` behavior
+  -- is deliberately unchanged.
+  let suppressSorryWarning : TermElabM Unit → TermElabM Unit :=
+    if statementOnly then (withOptions (warn.sorry.set · false) ·) else id
+  liftTermElabM <| suppressSorryWarning do
+    let statement ← vc.toVCStatement.type
+    let witness ← match witness? with
+      | some w => do
+        let w ← instantiateMVars w
+        -- Collapse cross-witness structural duplication before the proof
+        -- enters the environment (see `witnessShareState`).
+        witnessShareState.modifyGet fun s => s.shareCommon w
+      | none => Meta.mkSorry statement (synthetic := false)
+    let _ ← addVeilTheorem vc.name statement witness
+    return ()
+
+/-- Rolling state of the incremental persist pass, carried across the poll
+ticks of one `awaitFilteredWithLogging` run. -/
+private structure IncrementalPersistState where
+  /-- Manager generation `settled` belongs to; a reset restarts VC ids, so a
+  generation change invalidates the whole state. -/
+  managerId : ManagerId := 0
+  /-- VCs already persisted or terminally skipped this generation. -/
+  settled : Std.HashSet VCId := {}
+  /-- `VCManager.recordedResultCount` at the last pass — the short-circuit:
+  when no new discharger result arrived, there is nothing new to persist and
+  the pass returns without walking the DAG. -/
+  seenResults : Nat := 0
+
+/-- One incremental-persistence pass (used by `#gen_theorems`'s await loop):
+walk the VCs in dependency order and, for every finished VC with a *retained*
+witness, add its theorem to the environment now — while other dischargers are
+still running — then release the witness immediately
+(`VCManager.releasePersistedWitness`). This is what makes `#gen_theorems`
+scale in reconstruction mode (`veil.gen.streamTheorems`): peak memory holds
+only the completed-but-not-yet-persisted frontier instead of every witness.
+(The discharger side must cooperate: `resultPromise` is resolved with a
+witness-stripped result — a resolved promise would otherwise pin every
+witness for the discharger's lifetime, silently defeating this release.)
+
+VCs whose witness would need regeneration (lazy-dropped) are deliberately left
+to the final batch pass: regenerating re-runs elaboration and the SMT query,
+and doing that concurrently with a live sweep steals solver cores from
+in-flight dischargers (near-boundary VCs would time out spuriously).
+
+A VC is persisted only after every upstream VC (within `filter`) is settled:
+unlike the batch pass — which runs after every VC is done — this pass observes
+in-flight states, and a witness may reference an upstream VC's theorem
+constant.
+
+Concurrency: classification runs on an immutable manager *snapshot*, entirely
+outside the lock — the manager mutex is on the dischargers' result-recording
+hot path, and holding it across a DAG walk (or worse, `addProvenVCTheorem`)
+would stall the whole sweep. The lock is taken only to snapshot (`ref.get`)
+and per release write (re-checking the generation). Staleness is benign: a VC
+that completes after the snapshot is picked up by a later pass, and `force`
+runs one final unconditional pass when the await completes. Must run on the
+command-elaboration thread (environment mutation). -/
+private def persistProvenIncrementally (filter : VCMetadata → Bool)
+    (state : IncrementalPersistState) (force : Bool := false) :
+    CommandElabM IncrementalPersistState := do
+  let mgr ← vcManager.atomically fun ref => ref.get
+  let managerId := mgr._managerId
+  let state := if managerId == state.managerId then state
+    else { managerId, settled := {}, seenResults := 0 }
+  let recorded := mgr.recordedResultCount
+  if !force && recorded == state.seenResults then
+    return state
+  let stubsOn := veil.gen.trustedTheoremStubs.get (← getOptions)
+  let order := mgr.vcIdsInDependencyOrder filter
+  let orderSet := order.foldl (init := (∅ : Std.HashSet VCId)) (·.insert ·)
+  let mut settled := state.settled
+  for vcId in order do
+    if settled.contains vcId then continue
+    let upstream := (mgr.upstream[vcId]?.getD {}).toArray.filter orderSet.contains
+    if upstream.any (fun u => !settled.contains u) then continue
+    match mgr.vcFinalStatus? vcId with
+    | none => continue  -- still running: picked up by a later pass
+    | some .proven =>
+      match mgr.provenWitnessOrRegen? vcId with
+      | some (vc, (some w, regen?)) =>
+        -- A retained `sorryAx` witness persists as a statement-only stub
+        -- (free) only when stubs are on; otherwise persisting it would
+        -- regenerate — leave that to the batch pass.
+        if !w.hasSorry || stubsOn then
+          addProvenVCTheorem vc (some w) regen?
+          vcManager.atomically fun ref => do
+            let cur ← ref.get
+            if cur._managerId == managerId then
+              ref.set (cur.releasePersistedWitness vcId)
+          settled := settled.insert vcId
+      | some (_, (none, _)) => pure ()  -- lazy-dropped: batch pass
+      | none => settled := settled.insert vcId  -- proven without witness (trace VCs)
+    | some _ => settled := settled.insert vcId  -- terminally failed: batch skips it too
+  return { state with settled, seenResults := recorded }
 
 /-- Poll for discharger tasks from the manager and register them with `logSnapshotTask`.
     Waits until all VCs matching the filter are done, then returns the results.
-    This enables profiler trace propagation by registering tasks on the calling thread. -/
+    This enables profiler trace propagation by registering tasks on the calling thread.
+
+    With `persistIncrementally` (used by `#gen_theorems`), each poll iteration
+    also persists finished VCs with retained witnesses and releases their
+    witnesses (`persistProvenIncrementally`) — this must only be requested
+    from the command-elaboration thread (`waitFilteredSync`), never from the
+    async path, where environment mutations would be silently lost. -/
 private def awaitFilteredWithLogging (filter : VCMetadata → Bool)
+    (persistIncrementally : Bool := false)
     : CommandElabM (VerificationResults VCMetadata SmtResult) := do
+  let mut persistState : IncrementalPersistState := {}
+  if persistIncrementally then
+    witnessShareState.set default
   while true do
     logPendingDischargerTasks
     -- Surface manager-loop errors where the user is looking; the loop itself
     -- cannot log to the editor (it is not registered with `logSnapshotTask`).
     for err in ← managerLoopErrors.modifyGet fun errs => (errs, #[]) do
       logWarning m!"VC manager loop error: {err}"
+    if persistIncrementally then
+      persistState ← persistProvenIncrementally filter persistState
     -- Snapshot under the lock, render outside it (`toResults` pretty-prints).
     let mgr ← vcManager.atomically fun ref => ref.get
     if mgr.isDoneFiltered filter then
-      return ← liftCoreM (mgr.toResults filter)
+      let results ← liftCoreM (mgr.toResults filter)
+      if persistIncrementally then
+        -- One final unconditional pass: persist and release VCs that
+        -- completed between the last short-circuited tick and `isDone`, so
+        -- the batch pass afterwards is a pure idempotence check.
+        let _ ← persistProvenIncrementally filter persistState (force := true)
+      return results
     IO.sleep 10
   panic! "unreachable"
 
@@ -222,10 +438,16 @@ def runFilteredAsync (filter : VCMetadata → Bool)
 Returns the results on the main thread, allowing widget display.
 This also polls for discharger tasks from the manager and registers them with
 `logSnapshotTask`, enabling profiler trace propagation.
-Warning: This blocks the elaborator until all matching VCs complete. -/
-def waitFilteredSync (filter : VCMetadata → Bool) : CommandElabM (VerificationResults VCMetadata SmtResult) := do
+Warning: This blocks the elaborator until all matching VCs complete.
+
+With `persistIncrementally` (`#gen_theorems`), finished VCs with retained
+witnesses are persisted to the environment while the remaining dischargers are
+still running, and their witnesses released immediately — see
+`persistProvenIncrementally`. -/
+def waitFilteredSync (filter : VCMetadata → Bool)
+    (persistIncrementally : Bool := false) : CommandElabM (VerificationResults VCMetadata SmtResult) := do
   startFiltered filter
-  awaitFilteredWithLogging filter
+  awaitFilteredWithLogging filter persistIncrementally
 
 /-! ## Witness-size instrumentation (`veil.report.witnessSizes`) -/
 
@@ -252,52 +474,6 @@ def recordWitnessSize (discharger : Name) (witness : Expr) : IO Unit := do
   witnessSizeRegistry.modify
     (·.push { discharger := discharger, numObjs := n, trusted := witness.hasSorry })
 
-private def ensureExistingTheoremMatches (fullName : Name) (statement : Expr) : TermElabM Unit := do
-  let some info := (← getEnv).find? fullName
-    | return
-  unless ← Meta.isDefEq info.type statement do
-    throwError "cannot generate VC theorem `{fullName}` because a declaration with that name already exists with a different type"
-
-private def addProvenVCTheorem (vc : VerificationCondition VCMetadata SmtResult)
-    (witness? : Option Witness)
-    (regen? : Option (CommandElabM Witness)) : CommandElabM Unit := do
-  -- TRUSTED-STUB FAST PATH (`veil.gen.trustedTheoremStubs`, default true).
-  -- When the discharge was trusted-SMT-based, the stored witness slot carries
-  -- `sorryAx` — under lazy regen it is exactly the 1-node sentinel, and
-  -- without lazy regen it is the full `Eq.mpr` normalisation chain whose
-  -- *leaf* is the axiom. Either way the real proof's trust base is the
-  -- trusted axiom, so persisting `sorryAx <statement>` directly is
-  -- trust-equivalent — and skips both failure modes of witness
-  -- materialisation at scale: the serial re-elaboration of the regen
-  -- closure (a second SMT run per VC) and the O(action × clump) chain in
-  -- memory/olean. Reconstruction runs (`veil.smt.trust = false`) never take
-  -- this path: their witnesses contain no `sorryAx`.
-  let useTrustedStub :=
-    veil.gen.trustedTheoremStubs.get (← getOptions) && witness?.any (·.hasSorry)
-  -- Resolve the witness. ALWAYS prefer the regen closure when present — for
-  -- lazily-regenerated VCs the stored slot holds only a 1-node `sorryAx`
-  -- sentinel. A stored witness is a real proof only on paths without a regen
-  -- closure (e.g. interactive `@[veil]` theorems, where `regen? = none`).
-  let witness? : Option Witness ←
-    if useTrustedStub then
-      pure none  -- constructed below, from the statement
-    else some <$> match regen? with
-      | some regen => regen
-      | none => match witness? with
-        | some w => pure w
-        | none => throwError "no witness and no regeneration closure for VC `{vc.name}`"
-  liftTermElabM do
-    let fullName := (← getCurrNamespace).append vc.name
-    let statement ← vc.toVCStatement.type
-    if (← getEnv).contains fullName then
-      ensureExistingTheoremMatches fullName statement
-      return
-    let witness ← match witness? with
-      | some w => instantiateMVars w
-      | none => Meta.mkSorry statement (synthetic := false)
-    let _ ← addVeilTheorem vc.name statement witness
-    return ()
-
 /-- Add theorem declarations for all already-proven VCs matching `filter`.
 
 This must run on the command elaboration thread, not in the manager task: it
@@ -307,8 +483,44 @@ the manager DAG's dependency order so downstream proof terms can refer to
 upstream VC theorem constants. -/
 def addProvenTheoremsInDependencyOrder (filter : VCMetadata → Bool) : CommandElabM Unit := do
   let mgr ← vcManager.atomically fun ref => ref.get
+  -- UX: materialising a lazily-dropped witness re-runs its discharger — a
+  -- full elaboration plus SMT query per VC, serially on this thread. That
+  -- degradation is otherwise silent (`#gen_theorems` just takes a sweep's
+  -- worth of solver time, single-threaded), so when it is about to happen at
+  -- scale, say so and name the remedy. The threshold only separates "a few
+  -- stragglers" (fine) from "the whole module" (the misconfiguration).
+  let ns ← getCurrNamespace
+  let env ← getEnv
+  -- With statement-only persistence the stub path short-circuits before
+  -- witness resolution — no regeneration will run, so no warning.
+  let statementOnly := veil.gen.statementOnlyTheorems.get (← getOptions)
+  let regenCount : Nat := if statementOnly then 0 else
+    mgr.vcIdsInDependencyOrder filter |>.foldl (init := 0) fun n vcId =>
+      match mgr.provenWitnessOrRegen? vcId with
+      | some (vc, (none, some _)) => if env.contains (ns.append vc.name) then n else n + 1
+      | _ => n
+  if regenCount ≥ 50 then
+    logWarning m!"`#gen_theorems` is about to materialise {regenCount} proof \
+      witnesses by re-elaborating their dischargers serially (one full proof \
+      search per VC — the witnesses were dropped during the sweep, see \
+      `veil.lazyWitnessRegen`). For large modules verified with proof \
+      reconstruction (`veil.smt.trust false`), set \
+      `veil.gen.streamTheorems true` before `#gen_spec` instead: dischargers \
+      then retain their witnesses and `#gen_theorems` persists each one \
+      incrementally while the sweep is still running."
+  let mut persisted := 0
   for vcId in mgr.vcIdsInDependencyOrder filter do
     if let some (vc, (witness?, regen?)) := mgr.provenWitnessOrRegen? vcId then
       addProvenVCTheorem vc witness? regen?
+      persisted := persisted + 1
+  -- One summary instead of a per-declaration "uses `sorry`" warning ×N
+  -- (suppressed in `addProvenVCTheorem` for this deliberate, option-gated
+  -- mode).
+  if statementOnly && persisted > 0 then
+    let checked := if veil.smt.trust.get (← getOptions) then "checked by the solver"
+      else "reconstructed and kernel-checked (`veil.smt.trust false`)"
+    logInfo m!"persisted {persisted} VC theorems as statement-only `sorryAx` \
+      stubs (`veil.gen.statementOnlyTheorems`): their proofs were {checked} \
+      during the sweep, then discarded."
 
 end Veil.Verifier

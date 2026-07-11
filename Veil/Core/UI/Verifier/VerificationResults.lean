@@ -422,6 +422,21 @@ private def formatWitnessSizesReport [Monad m] [MonadOptions m] [MonadLiftT Base
     msg := msg ++ m!"  {e.numObjs}  {e.discharger}{flag}\n"
   return some msg
 
+/-- Note how many proof witnesses are currently retained in memory for
+streaming `#gen_theorems` persistence (`veil.gen.streamTheorems`) — and, in
+particular, that a module which never runs `#gen_theorems` should not set the
+option (retention would never be released). Shown only when the option is
+enabled. -/
+private def formatRetainedWitnessesNote [Monad m] [MonadOptions m] [MonadLiftT BaseIO m] :
+    m (Option MessageData) := do
+  unless veil.gen.streamTheorems.get (← getOptions) do return none
+  let count ← (vcManager.atomically fun ref => return (← ref.get).retainedWitnessCount : BaseIO _)
+  if count == 0 then return none
+  return some m!"{count} proof witnesses retained in memory for `#gen_theorems` \
+    (`veil.gen.streamTheorems`); it releases each one as it is persisted. If \
+    this module does not run `#gen_theorems`, unset the option — retained \
+    witnesses are never freed otherwise.\n"
+
 /-- Format verification results as text output for logging. -/
 def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
     (results : VerificationResults VCMetadata SmtResult) : m MessageData := do
@@ -464,6 +479,8 @@ def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
     msg := msg ++ slowMsg
   if let some sizeMsg ← formatWitnessSizesReport then
     msg := msg ++ sizeMsg
+  if let some retainedMsg ← formatRetainedWitnessesNote then
+    msg := msg ++ retainedMsg
   return msg
 
 /-- Check if any VCs have non-proven status. -/
