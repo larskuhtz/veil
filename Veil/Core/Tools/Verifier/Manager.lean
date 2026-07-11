@@ -460,6 +460,53 @@ def VCManager.provenWitnessOrRegen? (mgr : VCManager VCMetaT ResultT)
   | some (.proven witness? _ _) => some (vc, (witness?, discharger.regenWitness?))
   | _ => none
 
+/-- The final status recorded for `vcId`, if it has reached one
+(`_doneWith`). `none` means the VC is still running or waiting. -/
+def VCManager.vcFinalStatus? (mgr : VCManager VCMetaT ResultT)
+    (vcId : VCId) : Option VCStatus :=
+  mgr._doneWith[vcId]?
+
+/-- Number of discharger results recorded so far — a cheap progress signal for
+pollers that only need to know whether anything changed since their last look
+(`persistProvenIncrementally`'s short-circuit). -/
+def VCManager.recordedResultCount (mgr : VCManager VCMetaT ResultT) : Nat :=
+  mgr._dischargerResults.size
+
+/-- Number of result slots currently holding a retained sorry-free proof
+witness — streaming-persistence retention (`veil.gen.streamTheorems`) not yet
+released by `#gen_theorems`'s incremental persist pass (plus any interactive
+`@[veil]` theorem proofs, which are always stored in full). Used by the
+results display to surface how much witness mass is being held. -/
+def VCManager.retainedWitnessCount (mgr : VCManager VCMetaT ResultT) : Nat :=
+  mgr._dischargerResults.fold (init := 0) fun n _ res =>
+    match res with
+    | .proven (some w) _ _ => if w.hasSorry then n else n + 1
+    | _ => n
+
+/-- Release the stored witness of `vcId`'s successful discharger and drop its
+regeneration closure. Called by the incremental persist pass
+(`veil.gen.streamTheorems`) right after the VC's theorem has been added to the
+environment: the (large, reconstruction-mode) witness `Expr` and the closure
+have no further consumers. The result slot keeps its `ResultT` payload and
+timing; the witness is replaced by the same sentinel value lazy regen stores
+(a 1-node `sorryAx` for trusted witnesses — preserving the `hasSorry` signal
+that drives the trusted-SMT warning — and `none` for sorry-free ones). -/
+def VCManager.releasePersistedWitness (mgr : VCManager VCMetaT ResultT)
+    (vcId : VCId) : VCManager VCMetaT ResultT := Id.run do
+  let some vc := mgr.nodes[vcId]? | return mgr
+  let some dischargerId := vc.successful | return mgr
+  let mut mgr := mgr
+  if let some (.proven witness? data t) := mgr._dischargerResults[(vcId, dischargerId)]? then
+    let sentinel? : Option Witness :=
+      if witness?.any (·.hasSorry) then some (Lean.mkConst ``sorryAx) else none
+    mgr := { mgr with _dischargerResults :=
+      mgr._dischargerResults.insert (vcId, dischargerId) (.proven sentinel? data t) }
+  if let some discharger := vc.dischargers[dischargerId]? then
+    let discharger' := { discharger with regenWitness? := none }
+    let vc' := { vc with dischargers := vc.dischargers.set! dischargerId discharger' }
+    mgr := { mgr with nodes := mgr.nodes.insert vcId vc' }
+  return mgr
+
 def Discharger.run (discharger : Discharger ResultT) : BaseIO (Discharger ResultT) := do
   match discharger.task with
   | some _ => return discharger

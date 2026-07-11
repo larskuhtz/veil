@@ -259,7 +259,10 @@ private def solverRelevantOptionValues (opts : Options) : Array (String × Strin
   ("veil.smt.trust", toString (veil.smt.trust.get opts)),
   ("veil.smt.seed", toString (veil.smt.seed.get opts)),
   ("veil.smt.retries", toString (veil.smt.retries.get opts)),
-  ("veil.smt.retryTimeout", toString (veil.smt.retryTimeout.get opts))]
+  ("veil.smt.retryTimeout", toString (veil.smt.retryTimeout.get opts)),
+  -- Not a solver option, but discharger-captured all the same: witness
+  -- retention for streaming `#gen_theorems` persistence.
+  ("veil.gen.streamTheorems", toString (veil.gen.streamTheorems.get opts))]
 
 /-- Warn when solver options in scope at a check command differ from those
 captured when the VCs were generated. Dischargers elaborate their proof terms
@@ -664,12 +667,26 @@ def elabGenSpec : CommandElab := fun stx => do
     localEnv.modifyModule (fun _ => mod)
 
 @[command_elab Veil.genTheorems]
-def elabGenTheorems : CommandElab := fun _stx => do
+def elabGenTheorems : CommandElab := fun stx => do
   withTraceNode `veil.perf.elaborator.genTheorems (fun _ => return "#gen_theorems") do
     if ← isModelCheckCompileMode then return
     let mod ← getCurrentModule (errMsg := "You cannot #gen_theorems outside of a Veil module!")
     mod.throwIfSpecNotFinalized
-    let _ ← Verifier.waitFilteredSync (fun _ => true)
+    -- UX guard: witness retention (`veil.gen.streamTheorems`) is discharger
+    -- behavior, captured at `#gen_spec` — enabling the option only around this
+    -- command is inert (§: `solverOptionsAtVCGen` capture semantics).
+    if veil.gen.streamTheorems.get (← getOptions) then
+      if let some (genModule, genVals) ← Verifier.solverOptionsAtVCGen.get then
+        if genModule == mod.name && genVals.contains ("veil.gen.streamTheorems", "false") then
+          logWarningAt stx m!"`veil.gen.streamTheorems` is enabled here, but was \
+            disabled at `#gen_spec`, where dischargers capture it — witnesses \
+            were not retained during the sweep, so theorems will be \
+            materialised by serial regeneration. Set the option before \
+            `#gen_spec` instead."
+    -- Incremental persistence is unconditional: it persists whatever is
+    -- already persistable as soon as it (and its upstream) is done, and the
+    -- batch pass below covers the rest (stragglers, lazy-dropped witnesses).
+    let _ ← Verifier.waitFilteredSync (fun _ => true) (persistIncrementally := true)
     Verifier.addProvenTheoremsInDependencyOrder (fun _ => true)
 
 open Lean Meta Elab Command Veil in

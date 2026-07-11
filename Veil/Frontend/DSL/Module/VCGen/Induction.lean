@@ -94,6 +94,10 @@ def VCDischarger.fromTerm (term : Term) (actName : Name) (vcStatement : VCStatem
   -- async callback (which runs in a snapshot branch) sees a deterministic value
   -- independent of any later option changes.
   let lazyRegen := veil.lazyWitnessRegen.get (← getOptions)
+  -- Streaming theorem persistence (`veil.gen.streamTheorems`): retain
+  -- reconstruction witnesses in full so `#gen_theorems` can persist them
+  -- incrementally without re-elaboration. Same snapshot discipline.
+  let streamPersist := veil.gen.streamTheorems.get (← getOptions)
   -- Same snapshot discipline for the witness-size instrumentation.
   let measureWitness := veil.report.witnessSizes.get (← getOptions)
   -- Use wrapAsyncAsSnapshot for proper snapshot tree integration with the language server
@@ -123,20 +127,32 @@ def VCDischarger.fromTerm (term : Term) (actName : Name) (vcStatement : VCStatem
               (.inl witness) (endTime - startTime)
             -- LAZY WITNESS REGEN (gated on `veil.lazyWitnessRegen`, default true):
             -- replace the (~10 MB) witness with a 1-node sentinel.
-            -- `addProvenVCTheorem` always prefers `Discharger.regenWitness?` over
-            -- the stored slot for VCs that have a regen closure, so the sentinel
-            -- is never used as a real proof — it exists only to preserve the
-            -- `witness.hasSorry` signal that drives the trusted-SMT warning. With
-            -- `veil.smt.trust = true` the real witness contains `sorryAx`; we
-            -- mirror that with a bare `sorryAx` const. With trust off the real
-            -- witness has no sorry; we drop it entirely (sentinel = none).
+            -- `addProvenVCTheorem` treats a stored witness containing `sorryAx`
+            -- as a sentinel and regenerates via `Discharger.regenWitness?`, so
+            -- the sentinel is never used as a real proof — it exists only to
+            -- preserve the `witness.hasSorry` signal that drives the
+            -- trusted-SMT warning. With `veil.smt.trust = true` the real
+            -- witness contains `sorryAx`; we mirror that with a bare `sorryAx`
+            -- const. With trust off the real witness has no sorry; we drop it
+            -- entirely (sentinel = none) — unless streaming persistence
+            -- retains it (below), in which case the sorry-free stored witness
+            -- IS the real proof and is used directly.
             let dischargerResult :=
               if lazyRegen then
                 match dischargerResult with
                 | .proven _ data t =>
-                  let sentinel? : Option Witness :=
-                    if witness.hasSorry then some (Lean.mkConst ``sorryAx) else none
-                  .proven sentinel? data t
+                  -- STREAMING PERSISTENCE (`veil.gen.streamTheorems`): retain
+                  -- sorry-free (reconstruction) witnesses in full — the
+                  -- incremental persist pass at `#gen_theorems` adds each to
+                  -- the environment as soon as the VC (and its upstream) is
+                  -- done, then releases this slot. Trusted witnesses keep the
+                  -- 1-node sentinel regardless: the trusted-stub fast path
+                  -- never needs them.
+                  let witness? : Option Witness :=
+                    if witness.hasSorry then some (Lean.mkConst ``sorryAx)
+                    else if streamPersist then some witness
+                    else none
+                  .proven witness? data t
                 | other => other
               else dischargerResult
             return dischargerResult
@@ -146,8 +162,20 @@ def VCDischarger.fromTerm (term : Term) (actName : Name) (vcStatement : VCStatem
             (.inr ex) (endTime - startTime)
           return dischargerResult
       )
-      -- Resolve the result promise so Discharger.status can read it
-      resultPromise.resolve res
+      -- Resolve the result promise so Discharger.status can read it. Strip a
+      -- retained (sorry-free) witness first: promise consumers only inspect
+      -- the result's shape/timing, and a resolved promise pins its value for
+      -- the lifetime of the discharger node — it would keep every
+      -- streaming-retained witness (`veil.gen.streamTheorems`) alive long
+      -- after the incremental persist pass releases the manager's result
+      -- slot, silently defeating the release (observed as ~15+ GB of cold,
+      -- compressed heap on a ~3800-VC reconstruction sweep). The manager's copy (sent on
+      -- the channel below) keeps the full witness; sorry-carrying witnesses
+      -- (trusted mode) are left untouched to preserve the `hasSorry` signal.
+      let promiseRes := match res with
+        | .proven (some w) data t => if w.hasSorry then res else .proven none data t
+        | _ => res
+      resultPromise.resolve promiseRes
       -- Send notification to manager
       let _ ← ch.send (.dischargerResult dischargerId res)
       -- Note: wrapAsyncAsSnapshot expects Unit, so no return value
