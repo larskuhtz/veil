@@ -247,6 +247,42 @@ register_option veil.lazyWitnessRegen : Bool := {
   cost dominates the memory savings."
 }
 
+register_option veil.gen.statementOnlyTheorems : Bool := {
+  defValue := false
+  descr := "If true, `#gen_theorems` persists EVERY proven VC as a \
+  statement-only stub (a `sorryAx` of its statement), regardless of trust \
+  mode — including proof-reconstruction runs whose witnesses are real, \
+  kernel-checked proofs. Use this when the module is verified with \
+  `veil.smt.trust false` (so every proof IS kernel-checked at sweep time \
+  and the solver's unsat verdicts are not trusted) but the full proof \
+  terms are too large to retain in the environment and olean — at \
+  ~4 000 VCs with ~85 K-object reconstructed witnesses, real-proof \
+  persistence needs roughly twice the memory of the sweep itself. The \
+  persisted theorems' `sorryAx` then labels statement-only *persistence*, \
+  not solver trust; downstream axiom pins must use the four-axiom form and \
+  should document that reading. Mutually exclusive with \
+  `veil.gen.streamTheorems` in intent (retention is pointless when only \
+  statements are persisted)."
+}
+
+register_option veil.gen.streamTheorems : Bool := {
+  defValue := false
+  descr := "If true, dischargers retain their full proof witness after a \
+  successful discharge (instead of dropping it, `veil.lazyWitnessRegen`) so \
+  that `#gen_theorems` can persist each proven VC incrementally — while the \
+  sweep is still running — and release the witness immediately after adding \
+  its theorem to the environment. This is the scalable persistence mode for \
+  proof-reconstruction runs (`veil.smt.trust false`), where the trusted-stub \
+  fast path (`veil.gen.trustedTheoremStubs`) does not apply and lazy witness \
+  regeneration would re-run every proof reconstruction serially after the \
+  sweep. Like all discharger behavior, retention is captured at `#gen_spec` — \
+  set this option before `#gen_spec`, and only in modules that run \
+  `#gen_theorems` (without it, retained witnesses are never released and \
+  peak memory grows by the total witness mass). Inert under \
+  `veil.smt.trust = true`: trusted witnesses are persisted as statement-only \
+  stubs and are never retained in full."
+}
+
 register_option veil.gen.trustedTheoremStubs : Bool := {
   defValue := true
   descr := "If true (default), `#gen_theorems` persists a VC theorem whose \
