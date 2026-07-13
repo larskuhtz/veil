@@ -403,6 +403,9 @@ def elabTraceSpec (r : TSyntax `expected_smt_result) (name : Option (TSyntax `id
     let thmName := mkIdent vcName
     elabCommand (← `(theorem $thmName : $assertion := $proofTerm))
   | none =>
+    if ← isNoVerifyMode then
+      logWarningAt stx m!"⏭ trace query skipped (veil.noVerify)"
+      return
     -- Use VCManager with automatic discharger
     let vcStatement ← mkTraceVCStatement mod vcName assertion
     let metadata := mkTraceVCMetadata isExpectedSat numTransitions (some vcName) (some assertion)

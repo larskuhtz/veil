@@ -45,11 +45,19 @@ structure VCStatement where
   convenience in generating `theorem` statements, we keep the binders
   separately, in the `params` field. -/
   statement : Term
+  /-- Pre-elaborated statement type. When present, `VCStatement.type` returns
+  it directly instead of elaborating `params`/`statement`. Used by the
+  cross-file check commands, whose statements come from the persisted VC
+  registry (`veil.gen.vcRegistry`) as `Expr`s — elaborating against the
+  persisted `Expr` guarantees the checked statement is identical to what the
+  defining module generated, independent of the consumer file's scopes. -/
+  typeExpr? : Option Expr := none
 deriving Inhabited, BEq
 
 open Elab Term in
 /-- The type of the VC's statement as an `Expr`. -/
 def VCStatement.type (vc : VCStatement) : TermElabM Expr := do
+  if let some t := vc.typeExpr? then return t
   Term.elabBinders vc.params fun vs => do
   let body ← withSynthesize (postpone := .no) $
     withoutErrToSorry $ elabTerm vc.statement (Expr.sort levelZero)
