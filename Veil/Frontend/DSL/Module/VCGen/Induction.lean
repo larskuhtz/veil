@@ -417,21 +417,58 @@ def Module.generateVCs (mod : Module) : CommandElabM Unit := do
 (`vcRegistryExt`): name/action/property/kind/style, the statement syntax
 (display/stub use), and the statement elaborated to a closed `Expr` — the
 ground truth the cross-file commands check against. Runs at `#gen_spec`
-(after VC generation) when `veil.gen.vcRegistry` is enabled. -/
+(after VC generation) when `veil.gen.vcRegistry` is enabled.
+
+The statement elaborations are independent (closed statements against the
+current environment) and dominate the cost — measured ~62 ms each, i.e.
+~8 min *serial* on a ~7600-VC module — so they run in
+core-count parallel chunks, joined before the single extension write.
+Entry order (VC uid order) is preserved by in-order concatenation. -/
 def Module.persistVCRegistry (mod : Module) : CommandElabM Unit := do
   let vcs ← Verifier.withVCManager fun ref => do
     return (← ref.get).nodes.values.toArray
   let vcs := vcs.qsort (·.uid < ·.uid)
-  let entries : Array VCRegistryEntry ← liftTermElabM <|
-    vcs.foldlM (init := #[]) fun acc vc => do
-      match vc.metadata with
-      | .induction m =>
-        let ty ← vc.toVCStatement.type
-        return acc.push {
-          name := vc.name, «action» := m.action, property := m.property,
-          kind := m.kind, style := m.style,
-          params := vc.params, statement := vc.statement, «type» := ty }
-      | .trace _ => return acc
+  let inductionVCs := vcs.filterMap fun vc =>
+    match vc.metadata with
+    | .induction m => some (vc, m)
+    | .trace _ => none
+  let nWorkers := max 1 ((← getNumCores) - 1)
+  let chunkSize := max 1 ((inductionVCs.size + nWorkers - 1) / nWorkers)
+  let mut chunks : Array (Array _) := #[]
+  let mut i := 0
+  while i < inductionVCs.size do
+    chunks := chunks.push
+      (inductionVCs.extract i (min (i + chunkSize) inductionVCs.size))
+    i := i + chunkSize
+  let mut joins : Array (IO.Promise (Except String (Array VCRegistryEntry))) := #[]
+  for chunk in chunks do
+    let promise ← IO.Promise.new
+    let cancelTk ← IO.CancelToken.new
+    let act ← Command.wrapAsyncAsSnapshot (fun () => do
+      -- Never let this task die without resolving the promise (cf. the
+      -- discharger-totality lesson: an unresolved promise hangs the join).
+      try
+        let entries ← liftTermElabM <| chunk.mapM fun (vc, m) => do
+          let ty ← vc.toVCStatement.type
+          return { name := vc.name, «action» := m.action, property := m.property,
+                   kind := m.kind, style := m.style,
+                   params := vc.params, statement := vc.statement,
+                   «type» := ty : VCRegistryEntry }
+        promise.resolve (.ok entries)
+      catch ex =>
+        let msg ← try ex.toMessageData.toString catch _ => pure "<unrenderable exception>"
+        promise.resolve (.error msg)) cancelTk
+    let task ← (act ()).asTask
+    Command.logSnapshotTask { stx? := none, cancelTk? := cancelTk, task }
+    joins := joins.push promise
+  let mut entries : Array VCRegistryEntry := #[]
+  for p in joins do
+    match p.result?.get with
+    | some (.ok es) => entries := entries ++ es
+    | some (.error msg) =>
+      throwError "VC registry for `{mod.name}`: statement elaboration failed: {msg}"
+    | none =>
+      throwError "VC registry for `{mod.name}`: an elaboration task dropped its result"
   modifyEnv fun env => vcRegistryExt.addEntry env (mod.name, entries)
   logInfo m!"VC registry persisted for `{mod.name}`: {entries.size} VCs \
     (`veil.gen.vcRegistry`)"
