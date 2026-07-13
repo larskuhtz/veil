@@ -307,6 +307,45 @@ scoped syntax (name := checkInvariants) "#check_invariants" : command
 
 scoped syntax (name := checkAction) "#check_action" ident : command
 
+/-! Cross-file check/prove commands. They work in any file that imports a
+module compiled with `veil.gen.vcRegistry`: the module's VCs are re-created
+from the persisted registry (statements read as the persisted `Expr`s — no
+re-generation, no drift) and discharged in *this* file, whose solver
+options apply. -/
+
+/-- `#check_invariants <Module>`: check all of the imported module's
+invariant VCs cross-file. -/
+scoped syntax (name := checkInvariantsOf) "#check_invariants" ident : command
+
+/-- `#check_action <Module> <action>`: check one action of the imported
+module (all properties + doesNotThrow) cross-file. -/
+scoped syntax (name := checkActionOf) "#check_action" ident ident : command
+
+/-- `#check_vc <Module> <action> <property>`: check a single cell of the
+imported module cross-file. -/
+scoped syntax (name := checkVCOf) "#check_vc" ident ident ident : command
+
+/-- `#prove_action <Module> <action>`: cross-file, check all VCs of one
+action of the imported module and persist every successful proof as a
+theorem `<current namespace>.<vc name>`. Fails if any VC is not proven.
+Run with `set_option veil.smt.trust false` to persist kernel-checked
+reconstructions (real proofs, no `sorryAx`). Cells whose canonical
+theorem already exists in the current namespace (e.g. from a preceding
+`#prove_vc … by …`) are consumed as-is after a statement check, not
+re-solved. -/
+scoped syntax (name := proveAction) "#prove_action" ident ident : command
+
+/-- `#prove_vc <Module> <action> <property> (by <tac>)?`: cross-file,
+prove a single cell of the imported module — synchronously, on the
+command thread — and persist it as `<current namespace>.<vc name>`. The
+statement is the persisted registry statement (primary form). With no
+`by`, the cell's default discharge tactic is used; with `by <tac>`, the
+given tactic — this is the manual-cell override (quorum-intersection
+chains etc. that the SMT pipeline cannot find), the cross-file successor
+of the in-file `@[veil]` theorem workflow. Rejects proofs containing
+`sorry` or metavariables. -/
+scoped syntax (name := proveVC) "#prove_vc" ident ident ident (" by " tacticSeq)? : command
+
 /-- Run the explicit state model checker on the current module with the given
 type instantiation and theory. The optional `maxDepth` parameter limits how
 deep the breadth-first search will go before terminating.
