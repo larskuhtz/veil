@@ -49,7 +49,12 @@ def veilDefaultOptions : List (Name × DataValue) := [
   (`maxRecDepth, DataValue.ofNat 1024),
   -- Needed because the model checker produces the code for the transition
   -- system (partly) via typeclass inference.
-  (`maxHeartbeats, DataValue.ofNat 500000),
+  -- 500000 → 1000000: `#gen_state` on a ~50-component module sits at the
+  -- 500000 boundary; a file-level
+  -- `set_option maxHeartbeats` did not reach the failing `isDefEq`
+  -- (elaboration inside the module machinery), so the module default is the
+  -- effective knob.
+  (`maxHeartbeats, DataValue.ofNat 1000000),
   (`synthInstance.maxSize, DataValue.ofNat 4096),
 ]
 
@@ -84,6 +89,37 @@ register_option veil.violationIsError : Bool := {
 register_option veil.__modelCheckCompileMode : Bool := {
   defValue := false
   descr := "(INTERNAL ONLY. DO NOT USE.) When true, skip verification-only operations for model checking compilation."
+}
+
+register_option veil.gen.vcRegistry : Bool := {
+  defValue := false
+  descr := "When true, `#gen_spec` persists the module's VC registry into the \
+  olean: for every generated verification condition, its name, action, \
+  property, kind, style, statement syntax, and fully-elaborated statement \
+  (as an `Expr`). Files importing the module can then run \
+  `#check_invariants <Module>`, `#check_action <Module> <action>`, \
+  `#check_vc <Module> <action> <property>`, and `#prove_action <Module> \
+  <action>` cross-file, against exactly the statements this module's own \
+  sweep would check — the statements are read from the registry, never \
+  re-generated, so they cannot drift. Costs one statement elaboration per \
+  VC at `#gen_spec` plus olean size (~2 KB/VC)."
+}
+
+register_option veil.noVerify : Bool := {
+  defValue := false
+  descr := "When true, Veil elaborates specifications without running any \
+  verification. `#gen_spec` still elaborates the full specification and \
+  generates all VC statements, but does not start the background \
+  `doesNotThrow` checks; `#check_invariants`/`#check_action`, trace \
+  queries (`sat`/`unsat trace`), `#model_check`, and `#gen_theorems` log \
+  a visible '⏭ skipped' warning instead of solving. Intended for opening \
+  large models in an editor without paying their verification cost. The \
+  `VEIL_NO_VERIFY` environment variable (any value except empty or `0`) is \
+  equivalent to this option — set it in the *editor's* environment so \
+  language-server sessions skip solving while `lake build` from a clean \
+  shell is unaffected. NOTE: an elaboration under this mode checks and \
+  persists no VC theorems — never enable it for builds whose artifacts \
+  (oleans) are consumed downstream."
 }
 
 inductive VeilSolver : Type where
