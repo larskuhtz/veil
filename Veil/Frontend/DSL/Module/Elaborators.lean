@@ -16,6 +16,7 @@ import Veil.Core.Tools.ModelChecker.Concrete.Checker
 import Veil.Frontend.DSL.Action.Extract
 import Veil.Frontend.DSL.Module.Util.Enumeration
 import Veil.Util.Multiprocessing
+import Veil.Util.ProofCache
 import Veil.Frontend.DSL.Module.AssertionInfo
 
 open Lean Parser Elab Command
@@ -658,10 +659,20 @@ def elabProveAction : CommandElab := fun stx => do
     -- (e.g. persisted by a preceding `#prove_vc … by …` — the manual-cell
     -- workflow) are consumed as-is after a statement check, never re-solved.
     let ns ← getCurrNamespace
-    let env ← getEnv
     let some allEntries ← getVCRegistry? modName
       | throwError "no VC registry for module `{modName}` in scope \
           (modules with a registry: {(← vcRegistryModules).toList})"
+    -- Kernel replay (`veil.cache.kernelReplay`): cache hits at the
+    -- command level. A replayed cell is `addDecl`ed under its canonical
+    -- name — that `addDecl` IS the kernel check — and is then consumed by
+    -- the existing-theorem scan below, exactly like a manually `#prove_vc`d
+    -- cell; a miss or kernel rejection leaves the cell to the solve path.
+    for e in allEntries do
+      if e.action == actionName && e.kind == .primary
+          && !(← getEnv).contains (ns.append e.name) then
+        if let some ms ← liftCoreM <| ProofCache.replayPersist? (ns.append e.name) [] e.type then
+          logInfoAt stx m!"cell ({e.action}, {e.property}): ♻ kernel replay ({ms} ms)"
+    let env ← getEnv
     let preproven := allEntries.filter fun e =>
       e.action == actionName && e.kind == .primary && env.contains (ns.append e.name)
     for e in preproven do
@@ -717,6 +728,13 @@ def elabProveVC : CommandElab := fun stx => do
         let tacSeq : TSyntax ``Lean.Parser.Tactic.tacticSeq := ⟨stx[4][1]⟩
         `(by $tacSeq)
     let fullName := (← getCurrNamespace).append e.name
+    -- Kernel replay (`veil.cache.kernelReplay`): on a cache hit, persist the cached
+    -- term directly — that `addDecl` IS the kernel check; a miss or a
+    -- kernel rejection falls through to the tactic path below.
+    if let some ms ← liftCoreM <| ProofCache.replayPersist? fullName [] e.type then
+      logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} \
+        in {ms} ms (♻ kernel replay)"
+      return
     let t0 ← IO.monoMsNow
     -- ♻ visibility: a hits-delta across this synchronous elaboration means
     -- the proof came from the cache (`veil.cache.proofs`), not a solve.

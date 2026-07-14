@@ -352,6 +352,29 @@ register_option veil.cache.dir : String := {
   ever skips proof *search*, never checking)."
 }
 
+register_option veil.cache.kernelReplay : Bool := {
+  defValue := false
+  descr := "If true, proof-cache hits (`veil.cache.proofs`) are checked by \
+  the KERNEL instead of the elaborator. \
+  Persistence commands (`#prove_vc` and `#prove_action` cells) consult \
+  the cache at the command level and hand the cached \
+  term straight to `addDecl` — the kernel type-check IS the hit re-check — \
+  skipping tactic entry and the elaborator's `Meta.check`+`isDefEq`. \
+  Check-only discharges (sweep dischargers) kernel-check the cached term \
+  against a discarded scratch environment, which is *stronger* checking \
+  than a fresh sweep ✅ (elaborator-checked). A kernel rejection degrades \
+  to a miss and a fresh solve, so a stale or corrupt entry can never fail \
+  a build. No mode ever skips the check on a hit — this option only \
+  selects WHICH checker runs, and \
+  where. Like `veil.cache.proofs`, read at tactic/command runtime on the \
+  cross-file paths (a file-level `set_option` works as written \
+  there); for in-file sweeps set it before `#gen_spec`. Note: a \
+  command-level replay hit never elaborates the command's `by <tac>` \
+  suffix, so the unreachable-/unused-tactic linters flag it — set \
+  `linter.unreachableTactic`/`linter.unusedTactic` to false in files that \
+  expect hits."
+}
+
 register_option veil.gen.trustedTheoremStubs : Bool := {
   defValue := true
   descr := "If true (default), `#gen_theorems` persists a VC theorem whose \

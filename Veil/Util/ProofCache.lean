@@ -18,15 +18,19 @@ Design (the load-bearing invariants):
   validity is independent of which solver/seed/timeout found it, no solver
   configuration enters the key — which is exactly what lets a retry-ladder
   cell hit an entry stored by any of its attempts.
-* **The kernel is the only checker; the cache only skips search.**
-  Every hit is re-elaborated
-  against the *live* environment (`Meta.check` + `isDefEq` with the goal)
-  before the goal is assigned — the same level of checking a fresh
-  reconstruction gets at sweep time — and every persistence point
-  (`addDecl` in `#gen_theorems`/`#prove_action`/`#prove_vc`)
-  still kernel-checks. Any failure — corrupt file, changed definitions,
-  missing constants, toolchain drift — degrades to a miss and a fresh
-  solve; staleness cannot produce a wrong ✅.
+* **The check is never skipped on a hit; the cache only skips search.**
+  Every hit is re-checked before anything depends on it, in one of two
+  modes (`veil.cache.kernelReplay`): the default re-elaborates against the
+  *live* environment (`Meta.check` + `isDefEq` with the goal) — the same
+  level of checking a fresh reconstruction gets at sweep time; kernel
+  replay makes the *kernel* the only checker — persistence commands
+  `addDecl` the cached term directly (`replayPersist?`) and check-only
+  discharges kernel-check it against a discarded scratch environment.
+  Every persistence point (`addDecl` in
+  `#gen_theorems`/`#prove_action`/`#prove_vc`) kernel-checks in
+  either mode. Any failure — corrupt file, changed definitions, missing
+  constants, toolchain drift — degrades to a miss and a fresh solve;
+  staleness cannot produce a wrong ✅.
 * **Successes only**: timeouts must stay
   retryable and counterexamples re-findable, so only sorry-free proof
   terms are stored. Reconstruction mode only — trusted-mode witnesses
@@ -79,6 +83,17 @@ only an address — `find?` compares the stored statement itself. -/
 def entryPath (opts : Options) (stmt : Expr) : FilePath :=
   cacheDir opts / s!"{stmt.hash}.vpc"
 
+/-- Per-phase wall time of one `find?`:
+what a hit costs *before* any checking. Collected
+unconditionally (two clock reads); reported by callers on
+`trace.veil.cache`. -/
+structure LookupTiming where
+  /-- `pathExists` + unpickle (mmap load, region registration), µs. -/
+  unpickleUs : Nat := 0
+  /-- Guards on the loaded entry: schema check, statement structural `BEq`
+  (stored vs live), sorry-guard on the proof, µs. -/
+  beqUs : Nat := 0
+
 private unsafe def loadEntryUnsafe (path : FilePath) :
     IO (Entry × CompactedRegion) :=
   unpickle Entry path
@@ -87,19 +102,31 @@ private unsafe def loadEntryUnsafe (path : FilePath) :
 private opaque loadEntryImpl (path : FilePath) : IO (Entry × CompactedRegion)
 
 /-- Look up a closed statement. Returns the cached sorry-free proof term if
-an entry exists, deserializes, and states *exactly* `stmt` (structural
-equality) under the current schema — anything else (including a corrupt or
-other-toolchain file, via the `catch`) is `none`. The caller still must
-re-check the proof against the live environment before using it. -/
-def find? (opts : Options) (stmt : Expr) : IO (Option Entry) := do
+an entry exists, deserializes, states *exactly* `stmt` (structural
+equality) under the current schema, and contains no `sorryAx` (a stored
+entry never does — see `store` — so a sorry inside is a foreign/corrupt
+file, and accepting it would let a poisoned cache smuggle `sorryAx` past a
+kernel re-check, which proves any `sorryAx`-backed term happily). Anything
+else (including a corrupt or other-toolchain file, via the `catch`) is
+`none`. The caller still must re-check the proof against the live
+environment before using it. -/
+def find? (opts : Options) (stmt : Expr) : IO (Option Entry × LookupTiming) := do
   let path := entryPath opts stmt
-  unless ← path.pathExists do return none
+  let t0 ← IO.monoNanosNow
+  unless ← path.pathExists do
+    return (none, { unpickleUs := ((← IO.monoNanosNow) - t0) / 1000 })
   let loaded? ← try some <$> loadEntryImpl path catch _ => pure none
-  let some (entry, region) := loaded? | return none
+  let t1 ← IO.monoNanosNow
+  let some (entry, region) := loaded?
+    | return (none, { unpickleUs := (t1 - t0) / 1000 })
   regions.modify (·.push region)
-  unless entry.schemaVersion == schemaVersion do return none
-  unless entry.statement == stmt do return none
-  return some entry
+  let ok := entry.schemaVersion == schemaVersion
+    && entry.statement == stmt
+    && !entry.proof.hasSorry
+  let t2 ← IO.monoNanosNow
+  let timing : LookupTiming :=
+    { unpickleUs := (t1 - t0) / 1000, beqUs := (t2 - t1) / 1000 }
+  return (if ok then some entry else none, timing)
 
 /-- Store a successful discharge. Atomic (temp + rename): last writer wins,
 concurrent dischargers and parallel lake jobs are safe. Never throws — a
@@ -122,5 +149,55 @@ def store (opts : Options) (stmt proof : Expr) (solveMs : Nat) : IO Bool := do
 /-- Record a hit (after the caller's re-check succeeded). -/
 def recordHit : IO Unit :=
   stats.modify fun (h, s) => (h + 1, s)
+
+/-- Kernel replay (gated on `veil.cache.kernelReplay`):
+command-level kernel replay for the persistence paths (`#prove_vc`,
+`#prove_action` cells). On a cache hit for `stmt`, hands the
+cached term straight to `addDecl` under `name` — that `addDecl` IS the
+kernel check of the cached proof (the §2 ground rule: every hit is
+kernel-checked before anything depends on it; this path makes the kernel
+the *only* checker, skipping the tactic entry and the elaborator-level
+`Meta.check`+`isDefEq` a discharger hit pays on top).
+
+Returns the `addDecl` wall time (ms) when the theorem was added this way;
+`none` on a disabled cache, a miss, or a kernel rejection — the caller
+falls back to its fresh-solve path, so a stale or corrupt entry can never
+fail a build, and the fresh proof's `store` then overwrites the bad entry.
+
+Two `Lean.addDecl` internals this function must handle (v4.28):
+
+* under `Elab.async` (lake's default) a `thmDecl`'s kernel check runs in a
+  *background task* — a poisoned entry would fail the build later instead
+  of raising here. The replay add runs with `Elab.async` disabled so a
+  `KernelException` is thrown synchronously and caught;
+* a *failed* `addDecl` registers the declaration as an axiom (Lean's
+  follow-up-error suppression) and leaves the name occupied, which would
+  make the fallback solve's own `addDecl` fail with `alreadyDeclared` —
+  so the whole environment is restored on failure. -/
+def replayPersist? (name : Name) (levelParams : List Name) (stmt : Expr) :
+    CoreM (Option Nat) := do
+  let opts ← getOptions
+  if !veil.cache.proofs.get opts || !veil.cache.kernelReplay.get opts
+      || veil.smt.trust.get opts then
+    return none
+  if stmt.hasExprMVar || stmt.hasFVar || stmt.hasLevelMVar then
+    return none
+  let (some entry, timing) ← find? opts stmt | return none
+  let envBefore ← getEnv
+  let t0 ← IO.monoMsNow
+  try
+    withOptions (Elab.async.set · false) do
+      addDecl (.thmDecl { name, levelParams, type := stmt, value := entry.proof })
+  catch ex =>
+    setEnv envBefore
+    if ex.isInterrupt then throw ex
+    trace[veil.cache] "cached proof for {name} failed the kernel check — re-solving"
+    return none
+  let t1 ← IO.monoMsNow
+  recordHit
+  trace[veil.cache] "♻ kernel replay {name}; phases[µs]: \
+    unpickle={timing.unpickleUs} beq={timing.beqUs} \
+    kernelAddDecl={(t1 - t0) * 1000} (stored solve: {entry.solveMs} ms)"
+  return some (t1 - t0)
 
 end Veil.ProofCache
