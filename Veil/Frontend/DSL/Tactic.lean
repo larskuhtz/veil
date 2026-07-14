@@ -1346,6 +1346,28 @@ def elabVeilSolveTr : DesugarTacticM Unit := veilWithMainContext do
   else
     veilWithMainContext <| veilEvalTactic <| ← `(tactic| veil_intros; __veil_solve_tr_conservative)
 
+/-- Make a to-be-cached proof self-contained: inline every *file-local*
+constant it references (elaboration mints per-theorem auxiliaries — e.g.
+the `<thm>.match_1` of the `doesNotThrow` trivial branch — that exist in
+no other environment, so an entry referencing one can never kernel-check
+in a consumer file; observed as the dnt cells re-storing on every build).
+Returns `none` if a file-local constant has no value to inline (the entry
+could never replay — skip the store). -/
+private def selfContainForCache (proof : Expr) : MetaM (Option Expr) := do
+  let env ← getEnv
+  let isLocal := fun (n : Name) => env.getModuleIdxFor? n |>.isNone
+  let mut e := proof
+  -- Inlining can expose further local constants; a few rounds suffice in
+  -- practice (aux decls don't nest deeply) — bail out rather than loop.
+  for _ in [0:8] do
+    let locals := e.getUsedConstants.filter isLocal
+    if locals.isEmpty then
+      return some e
+    if locals.any (fun n => !(env.find? n |>.any (·.hasValue))) then
+      return none
+    e ← Meta.deltaExpand e (fun n => locals.contains n)
+  return none
+
 /-- Consult/populate the content-addressed proof cache around a discharge
 tactic (`veil.cache.proofs`; design notes in
 `Veil/Util/ProofCache.lean`). Wraps the three public solve entry points at
@@ -1438,15 +1460,20 @@ def withProofCache (inner : DesugarTacticM Unit) : DesugarTacticM Unit := do
   let t1 ← IO.monoMsNow
   let proof ← instantiateMVars (mkMVar goal)
   if !proof.hasSorry && !proof.hasExprMVar && !proof.hasLevelMVar then
-    let ts0 ← IO.monoNanosNow
-    let stored ← ProofCache.store opts stmt proof (t1 - t0)
-    let ts1 ← IO.monoNanosNow
-    if stored then
-      trace[veil.cache] "stored proof ({t1 - t0} ms solve, \
-        store {(ts1 - ts0) / 1000} µs)"
-    else
-      trace[veil.cache] "proof cache store failed (cache dir not \
-        writable?) — continuing without caching"
+    match ← goal.withContext (selfContainForCache proof) with
+    | none =>
+      trace[veil.cache] "proof references file-local constants with no \
+        value to inline — not cached"
+    | some proof =>
+      let ts0 ← IO.monoNanosNow
+      let stored ← ProofCache.store opts stmt proof (t1 - t0)
+      let ts1 ← IO.monoNanosNow
+      if stored then
+        trace[veil.cache] "stored proof ({t1 - t0} ms solve, \
+          store {(ts1 - ts0) / 1000} µs)"
+      else
+        trace[veil.cache] "proof cache store failed (cache dir not \
+          writable?) — continuing without caching"
 
 @[inherit_doc veil_bmc]
 def elabVeilBmc : DesugarTacticM Unit := veilWithMainContext do

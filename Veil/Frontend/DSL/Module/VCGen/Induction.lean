@@ -426,7 +426,7 @@ depends only on the syntax tree itself. -/
 private partial def sanitizePersistedSyntax : Syntax → Syntax
   | .node _ k args => .node .none k (args.map sanitizePersistedSyntax)
   | .atom _ val => .atom .none val
-  | .ident _ _ val pre => .ident .none (toString val).toSubstring val pre
+  | .ident _ _ val pre => .ident .none (toString val).toRawSubstring val pre
   | .missing => .missing
 
 /-- Persist the current VC manager's induction VCs as `mod`'s VC registry
