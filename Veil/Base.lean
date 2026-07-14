@@ -26,6 +26,7 @@ initialize
   registerTraceClass `veil.info
   registerTraceClass `veil.warning
   registerTraceClass `veil.debug
+  registerTraceClass `veil.cache
   registerTraceClass `veil.desugar
   registerTraceClass `veil.wp
   registerTraceClass `veil.timing
@@ -320,6 +321,35 @@ register_option veil.gen.streamTheorems : Bool := {
   peak memory grows by the total witness mass). Inert under \
   `veil.smt.trust = true`: trusted witnesses are persisted as statement-only \
   stubs and are never retained in full."
+}
+
+register_option veil.cache.proofs : Bool := {
+  defValue := false
+  descr := "If true, the Veil discharge tactics (`veil_solve_wp`, \
+  `veil_solve_tr`, `veil_solve_wp_doesnotthrow`) consult a content-addressed \
+  on-disk proof cache (`veil.cache.dir`) before searching, and store every \
+  successful sorry-free proof term after. Reconstruction mode only \
+  (`veil.smt.trust false`): trusted-mode discharges are never cached. The \
+  cache key is the closed goal statement itself (the stored entry carries \
+  the full statement `Expr`; a hash collision is a miss, never a wrong \
+  answer), so it is solver- and option-independent — a cached proof either \
+  re-checks against the live goal and environment (`Meta.check` + `isDefEq` \
+  on every hit; the kernel still checks at every persistence point) or it \
+  is treated as a miss and re-solved. Failures, timeouts, and \
+  counterexamples are never cached (they must stay retryable / \
+  re-findable). Read at tactic runtime: for in-file sweeps set it before \
+  `#gen_spec` (discharger option capture); in cross-file consumers a \
+  file-level `set_option` works as written. Per-hit detail on \
+  `trace.veil.cache`; sweep output reports one ♻ summary line."
+}
+
+register_option veil.cache.dir : String := {
+  defValue := ".lake/build/veilcache"
+  descr := "Directory of the on-disk proof cache (`veil.cache.proofs`), \
+  relative to the process working directory (the workspace root under \
+  `lake build` and in the language server). One file per cached proof, \
+  named by the statement hash; safe to delete at any time (the cache only \
+  ever skips proof *search*, never checking)."
 }
 
 register_option veil.gen.trustedTheoremStubs : Bool := {
