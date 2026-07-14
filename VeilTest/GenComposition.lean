@@ -2,7 +2,7 @@ import VeilTest.GenCompositionBase
 
 /-! # `#gen_composition` test — the proof/certificate consumer
 
-The consumer half of the M6 file-family test: cross-file `#prove_action`
+The consumer half of the file-family test: cross-file `#prove_action`
 for every action (which persists each cell as a kernel-checked theorem
 *and* emits the per-action preservation lemma `step_<action>` /
 `init_case`), then `#gen_composition` assembling them into
@@ -42,3 +42,12 @@ end CompRing
 /-- info: 'CompRing.reachable_leader_unique' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms CompRing.reachable_leader_unique
+
+/- `#veil_status`: with every proof file "imported" (here: elaborated
+above), the audit command finds a real, statement-matching theorem for
+every registry cell and pins the machine-checked form of the trust table.
+The registry-only and table forms are pinned in `VeilTest/VeilStatus.lean`. -/
+
+/-- info: #veil_status CompRing: 9/9 real; axioms: propext, Classical.choice, Quot.sound -/
+#guard_msgs in
+#veil_status CompRing

@@ -690,7 +690,7 @@ def elabProveAction : CommandElab := fun stx => do
     else
       logInfoAt stx m!"#prove_action {modName} {actionName}: every cell was \
         already proven in namespace `{ns}`; nothing to solve"
-    -- M6 (`#gen_composition`): with every cell persisted, emit the one
+    -- `#gen_composition`: with every cell persisted, emit the one
     -- lemma the composition consumes — the per-action preservation lemma
     -- (`step_<action>` / `init_case`), kernel-checked like everything else.
     emitPreservationLemma stx modName actionName
