@@ -1354,12 +1354,21 @@ dischargers, the cross-file `#check_*`/`#prove_*` commands, and retry
 ladders (whose `set_option` wrappers do not enter
 the key — a proof's validity is configuration-independent).
 
-Hit: the cached proof is re-checked against the *live* goal and
-environment (`Meta.check` + `isDefEq`) before the goal is assigned; any
-failure degrades to a miss and a fresh solve. Miss: run `inner` and store
-the resulting proof iff it is closed and sorry-free. Reconstruction mode
-only — under `veil.smt.trust` the witness is `sorryAx`-based and is
-neither stored nor looked up. -/
+Hit: the cached proof is re-checked before the goal is assigned; any
+failure degrades to a miss and a fresh solve. The checker is selected by
+`veil.cache.kernelReplay`: off — the
+elaborator re-checks against the *live* goal and environment
+(`Meta.check` + `isDefEq`); on — the *kernel* re-checks, via `addDecl` of
+the cached term against a scratch copy of the kernel environment that is
+then discarded (nothing retained; a sweep ✅-on-hit is thereby
+kernel-checked, which is stronger than a fresh sweep's
+elaborator-checked ✅). No mode ever skips the check on a hit. Per-phase
+wall times on every hit via `trace.veil.cache` (unpickle / stmt-BEq /
+check phases).
+
+Miss: run `inner` and store the resulting proof iff it is closed and
+sorry-free. Reconstruction mode only — under `veil.smt.trust` the witness
+is `sorryAx`-based and is neither stored nor looked up. -/
 def withProofCache (inner : DesugarTacticM Unit) : DesugarTacticM Unit := do
   let opts ← getOptions
   if !veil.cache.proofs.get opts || veil.smt.trust.get opts then
@@ -1372,28 +1381,69 @@ def withProofCache (inner : DesugarTacticM Unit) : DesugarTacticM Unit := do
   if stmt.hasExprMVar || stmt.hasFVar || stmt.hasLevelMVar then
     inner
     return
-  if let some entry ← ProofCache.find? opts stmt then
-    let ok ← goal.withContext do
-      try
-        Meta.check entry.proof
-        Meta.isDefEq (← Meta.inferType entry.proof) stmt
-      catch _ => pure false
-    if ok then
-      goal.assign entry.proof
-      replaceMainGoal []
-      ProofCache.recordHit
-      trace[veil.cache] "♻ hit: cached proof re-checked against the live \
-        goal (stored solve: {entry.solveMs} ms)"
-      return
+  let (entry?, lookup) ← ProofCache.find? opts stmt
+  if let some entry := entry? then
+    if veil.cache.kernelReplay.get opts then
+      -- Kernel-only re-check. `toKernelEnv` blocks on pending async
+      -- kernel checks (timed separately — it is a real serialization
+      -- point); the scratch result env is discarded, so nothing is
+      -- retained. A `KernelException` (stale entry, missing constants,
+      -- poisoned file) degrades to a miss, exactly like a failed
+      -- `Meta.check` in v1.
+      let tk0 ← IO.monoNanosNow
+      let kenv := (← getEnv).toKernelEnv
+      let tk1 ← IO.monoNanosNow
+      let decl := Declaration.thmDecl {
+        name := `_veilProofCacheKernelReplayCheck, levelParams := []
+        «type» := stmt, value := entry.proof }
+      let res := kenv.addDecl (← getOptions) decl
+      let tk2 ← IO.monoNanosNow
+      if res matches .ok _ then
+        goal.assign entry.proof
+        replaceMainGoal []
+        ProofCache.recordHit
+        trace[veil.cache] "♻ hit (kernel replay); phases[µs]: \
+          unpickle={lookup.unpickleUs} beq={lookup.beqUs} \
+          kenv={(tk1 - tk0) / 1000} kernelAddDecl={(tk2 - tk1) / 1000} \
+          (stored solve: {entry.solveMs} ms)"
+        return
+      else
+        trace[veil.cache] "stale cache entry (kernel check failed) — re-solving"
     else
-      trace[veil.cache] "stale cache entry (re-check failed) — re-solving"
+      -- Elaborator-level re-check, phase-timed.
+      let tc0 ← IO.monoNanosNow
+      let checkOk ← goal.withContext do
+        try Meta.check entry.proof; pure true catch _ => pure false
+      let tc1 ← IO.monoNanosNow
+      let ok ← if checkOk then
+          goal.withContext do
+            try Meta.isDefEq (← Meta.inferType entry.proof) stmt
+            catch _ => pure false
+        else
+          pure false
+      let tc2 ← IO.monoNanosNow
+      if ok then
+        goal.assign entry.proof
+        replaceMainGoal []
+        ProofCache.recordHit
+        trace[veil.cache] "♻ hit; phases[µs]: unpickle={lookup.unpickleUs} \
+          beq={lookup.beqUs} metaCheck={(tc1 - tc0) / 1000} \
+          inferTypeIsDefEq={(tc2 - tc1) / 1000} \
+          (stored solve: {entry.solveMs} ms)"
+        return
+      else
+        trace[veil.cache] "stale cache entry (re-check failed) — re-solving"
   let t0 ← IO.monoMsNow
   inner
   let t1 ← IO.monoMsNow
   let proof ← instantiateMVars (mkMVar goal)
   if !proof.hasSorry && !proof.hasExprMVar && !proof.hasLevelMVar then
-    if ← ProofCache.store opts stmt proof (t1 - t0) then
-      trace[veil.cache] "stored proof ({t1 - t0} ms solve)"
+    let ts0 ← IO.monoNanosNow
+    let stored ← ProofCache.store opts stmt proof (t1 - t0)
+    let ts1 ← IO.monoNanosNow
+    if stored then
+      trace[veil.cache] "stored proof ({t1 - t0} ms solve, \
+        store {(ts1 - ts0) / 1000} µs)"
     else
       trace[veil.cache] "proof cache store failed (cache dir not \
         writable?) — continuing without caching"
