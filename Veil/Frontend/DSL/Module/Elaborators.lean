@@ -723,6 +723,9 @@ def elabProveVC : CommandElab := fun stx => do
         `(by $tacSeq)
     let fullName := (← getCurrNamespace).append e.name
     let t0 ← IO.monoMsNow
+    -- ♻ visibility: a hits-delta across this synchronous elaboration means
+    -- the proof came from the cache (`veil.cache.proofs`), not a solve.
+    let hits0 ← ProofCache.statsHits
     liftTermElabM <| Term.withDeclName fullName do
       let proof ← Term.elabTermEnsuringType term e.type
       Term.synthesizeSyntheticMVarsNoPostponing
@@ -735,7 +738,8 @@ def elabProveVC : CommandElab := fun stx => do
         name := fullName, levelParams := []
         «type» := e.type, value := proof })
     let t1 ← IO.monoMsNow
-    logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} in {t1 - t0} ms"
+    let cacheNote := if (← ProofCache.statsHits) > hits0 then " (proof ♻ from cache)" else ""
+    logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} in {t1 - t0} ms{cacheNote}"
 
 
 @[command_elab Veil.genState]

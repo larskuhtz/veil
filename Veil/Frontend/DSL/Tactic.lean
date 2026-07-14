@@ -8,6 +8,7 @@ import Veil.Backend.SMT.Preprocessing
 import Veil.Backend.SMT.Quantifiers
 import Veil.Util.ReplacingInstances
 import Veil.Util.UnhygienicCasesM
+import Veil.Util.ProofCache
 
 open Lean Elab Tactic Meta Simp Tactic.TryThis Parser.Tactic
 namespace Veil
@@ -1345,6 +1346,58 @@ def elabVeilSolveTr : DesugarTacticM Unit := veilWithMainContext do
   else
     veilWithMainContext <| veilEvalTactic <| ← `(tactic| veil_intros; __veil_solve_tr_conservative)
 
+/-- Consult/populate the content-addressed proof cache around a discharge
+tactic (`veil.cache.proofs`; design notes in
+`Veil/Util/ProofCache.lean`). Wraps the three public solve entry points at
+dispatch, which covers every discharge path with one seam: in-file sweep
+dischargers, the cross-file `#check_*`/`#prove_*` commands, and retry
+ladders (whose `set_option` wrappers do not enter
+the key — a proof's validity is configuration-independent).
+
+Hit: the cached proof is re-checked against the *live* goal and
+environment (`Meta.check` + `isDefEq`) before the goal is assigned; any
+failure degrades to a miss and a fresh solve. Miss: run `inner` and store
+the resulting proof iff it is closed and sorry-free. Reconstruction mode
+only — under `veil.smt.trust` the witness is `sorryAx`-based and is
+neither stored nor looked up. -/
+def withProofCache (inner : DesugarTacticM Unit) : DesugarTacticM Unit := do
+  let opts ← getOptions
+  if !veil.cache.proofs.get opts || veil.smt.trust.get opts then
+    inner
+    return
+  let goal ← getMainGoal
+  let stmt ← goal.withContext do instantiateMVars (← goal.getType)
+  -- Only closed statements are cacheable (VC statements are; an open goal
+  -- would key on meaningless local context).
+  if stmt.hasExprMVar || stmt.hasFVar || stmt.hasLevelMVar then
+    inner
+    return
+  if let some entry ← ProofCache.find? opts stmt then
+    let ok ← goal.withContext do
+      try
+        Meta.check entry.proof
+        Meta.isDefEq (← Meta.inferType entry.proof) stmt
+      catch _ => pure false
+    if ok then
+      goal.assign entry.proof
+      replaceMainGoal []
+      ProofCache.recordHit
+      trace[veil.cache] "♻ hit: cached proof re-checked against the live \
+        goal (stored solve: {entry.solveMs} ms)"
+      return
+    else
+      trace[veil.cache] "stale cache entry (re-check failed) — re-solving"
+  let t0 ← IO.monoMsNow
+  inner
+  let t1 ← IO.monoMsNow
+  let proof ← instantiateMVars (mkMVar goal)
+  if !proof.hasSorry && !proof.hasExprMVar && !proof.hasLevelMVar then
+    if ← ProofCache.store opts stmt proof (t1 - t0) then
+      trace[veil.cache] "stored proof ({t1 - t0} ms solve)"
+    else
+      trace[veil.cache] "proof cache store failed (cache dir not \
+        writable?) — continuing without caching"
+
 @[inherit_doc veil_bmc]
 def elabVeilBmc : DesugarTacticM Unit := veilWithMainContext do
   -- FIXME: sometimes we still have abstract dispatchers in the types, so as a
@@ -1476,7 +1529,7 @@ def elabVeilTactics : Tactic := fun stx => do
   | `(tactic| veil_fol $[!%$agg]?) => do
     withTraceNode `veil.perf.tactic (fun _ => return "veil_fol") (elabVeilFol (agg.isSome))
   | `(tactic| veil_solve_wp) => do
-    withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_wp") elabVeilSolveWp
+    withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_wp") (withProofCache elabVeilSolveWp)
   | `(tactic| __veil_solve_wplo) => do
     withTraceNode `veil.perf.tactic (fun _ => return "__veil_solve_wplo") elabVeilSolveWplo
   | `(tactic| __veil_solve_trlo) => do
@@ -1486,9 +1539,9 @@ def elabVeilTactics : Tactic := fun stx => do
   | `(tactic| __veil_solve_tr_conservative) => do
     withTraceNode `veil.perf.tactic (fun _ => return "__veil_solve_tr_conservative") elabVeilSolveTrConservative
   | `(tactic| veil_solve_wp_doesnotthrow) => do
-    withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_wp_doesnotthrow") elabVeilSolveWpDoesNotThrow
+    withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_wp_doesnotthrow") (withProofCache elabVeilSolveWpDoesNotThrow)
   | `(tactic| veil_solve_tr) => do
-    withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_tr") elabVeilSolveTr
+    withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_tr") (withProofCache elabVeilSolveTr)
   | `(tactic| veil_bmc) => do
     withTraceNode `veil.perf.tactic (fun _ => return "veil_bmc") elabVeilBmc
   | `(tactic| veil_split_ifs) => do
