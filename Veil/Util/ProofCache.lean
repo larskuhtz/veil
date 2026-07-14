@@ -128,10 +128,44 @@ def find? (opts : Options) (stmt : Expr) : IO (Option Entry × LookupTiming) := 
     { unpickleUs := (t1 - t0) / 1000, beqUs := (t2 - t1) / 1000 }
   return (if ok then some entry else none, timing)
 
+/-- Whether this process has already run the store-time GC. -/
+initialize gcRan : IO.Ref Bool ← IO.mkRef false
+
+/-- Age-based GC (`veil.cache.maxAgeDays`): once per
+process, at the first successful store, delete entries whose mtime is older
+than the cutoff (and day-old `.tmp` strays from crashed writers). "Now" is
+`refPath`'s own mtime — the entry this process just stored — avoiding any
+wall-vs-monotonic clock mismatch. Hits do not refresh mtime (nothing
+touches files on the hit path), so a hit-only entry re-solves once per
+cutoff period and re-enters fresh. Never throws; runs only when a store
+already happened, so a fully-warm build never pays the scan. -/
+def gcIfDue (opts : Options) (refPath : FilePath) : IO Unit := do
+  let days := veil.cache.maxAgeDays.get opts
+  if days == 0 then return
+  if ← gcRan.modifyGet fun b => (b, true) then return
+  try
+    let now := (← refPath.metadata).modified.sec
+    let mut deleted := 0
+    for e in ← (cacheDir opts).readDir do
+      let m ← try e.path.metadata catch _ => continue
+      let age := now - m.modified.sec
+      let stale :=
+        (e.path.extension == some "vpc" && age > (days * 86400 : Int)) ||
+        (e.path.extension == some "tmp" && age > 86400)
+      if stale then
+        try IO.FS.removeFile e.path catch _ => pure ()
+        deleted := deleted + 1
+    if deleted > 0 then
+      let entriesWord := if deleted == 1 then "entry" else "entries"
+      let daysWord := if days == 1 then "day" else "days"
+      IO.eprintln s!"veil.cache: GC deleted {deleted} {entriesWord} older than {days} {daysWord}"
+  catch _ => pure ()
+
 /-- Store a successful discharge. Atomic (temp + rename): last writer wins,
 concurrent dischargers and parallel lake jobs are safe. Never throws — a
 full disk or read-only cache dir degrades to "no cache", logged on
-`trace.veil.cache` by the caller via the `Bool` result. -/
+`trace.veil.cache` by the caller via the `Bool` result. The first store of
+a process also triggers the age-based GC (`gcIfDue`). -/
 def store (opts : Options) (stmt proof : Expr) (solveMs : Nat) : IO Bool := do
   try
     let dir := cacheDir opts
@@ -142,6 +176,7 @@ def store (opts : Options) (stmt proof : Expr) (solveMs : Nat) : IO Bool := do
       `veilProofCache
     IO.FS.rename tmp path
     stats.modify fun (h, s) => (h, s + 1)
+    gcIfDue opts path
     return true
   catch _ =>
     return false

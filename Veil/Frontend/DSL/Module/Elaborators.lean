@@ -217,38 +217,49 @@ private def generateIgnoreFn (mod : Module) : CommandElabM Unit := do
 
 
 /-- Crystallizes the state of the module, i.e. it defines it as a Lean
-`structure` definition, if that hasn't already happened. -/
+`structure` definition, if that hasn't already happened.
+
+State generation on a large module (~50 components) needs a raised
+heartbeat budget in one `isDefEq` inside the machinery, and a file-level
+`set_option maxHeartbeats` demonstrably does not reach that site
+— while the module-default option block does.
+The raise therefore lives here, scoped to state generation (`max`, never
+lowering a user raise), so the rest of the module — in particular the
+sweep dischargers, which capture options at `#gen_spec` — elaborates under
+the plain `veilDefaultOptions` budget. -/
 private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := do
   if mod.isStateDefined then
     return mod
-  let (mod, stateStxs) ← do (if mod._useFieldRepTC then do
-      -- Resolve concrete representation configurations
-      let repConfigs ← resolveConcreteRepConfigs mod._concreteRepConfig
-      let (mod, fieldStxs) ← mod.declareStateFieldLabelTypeAndDispatchers repConfigs
-      let (mod, stateStxs) ← mod.declareFieldsAbstractedStateStructure repConfigs
-      return (mod, fieldStxs ++ stateStxs)
-    else mod.declareStateStructure)
-  let (mod, theoryStxs) ← mod.declareTheoryStructure
-  let instantiationStx ← mod.mkInstantiationStructure
-  for stx in stateStxs ++ theoryStxs ++ #[instantiationStx] do
-    elabVeilCommand stx
-  generateIgnoreFn mod
-  let mod := { mod with _stateDefined := true }
-  if mod._useLocalRPropTC && !(← isModelCheckCompileMode) then
-    let stxs ← liftTermElabM mod.declareLocalTheoryPropTC
-    for stx in stxs do
+  Command.withScope (fun sc =>
+      { sc with opts := maxHeartbeats.set sc.opts (max 1000000 (maxHeartbeats.get sc.opts)) }) do
+    let (mod, stateStxs) ← do (if mod._useFieldRepTC then do
+        -- Resolve concrete representation configurations
+        let repConfigs ← resolveConcreteRepConfigs mod._concreteRepConfig
+        let (mod, fieldStxs) ← mod.declareStateFieldLabelTypeAndDispatchers repConfigs
+        let (mod, stateStxs) ← mod.declareFieldsAbstractedStateStructure repConfigs
+        return (mod, fieldStxs ++ stateStxs)
+      else mod.declareStateStructure)
+    let (mod, theoryStxs) ← mod.declareTheoryStructure
+    let instantiationStx ← mod.mkInstantiationStructure
+    for stx in stateStxs ++ theoryStxs ++ #[instantiationStx] do
       elabVeilCommand stx
-    let stxs ← liftTermElabM mod.declareLocalRPropTC
-    for stx in stxs do
-      elabVeilCommand stx
-    -- Generate the transition weakening lemma for this module
-    if mod._useFieldRepTC then
-      try
-        let cmd ← liftTermElabM mod.declareTransitionWeakeningLemma
-        elabVeilCommand cmd
-      catch ex =>
-        logWarning m!"unable to generate transition weakening lemma: {ex.toMessageData}"
-  pure mod
+    generateIgnoreFn mod
+    let mod := { mod with _stateDefined := true }
+    if mod._useLocalRPropTC && !(← isModelCheckCompileMode) then
+      let stxs ← liftTermElabM mod.declareLocalTheoryPropTC
+      for stx in stxs do
+        elabVeilCommand stx
+      let stxs ← liftTermElabM mod.declareLocalRPropTC
+      for stx in stxs do
+        elabVeilCommand stx
+      -- Generate the transition weakening lemma for this module
+      if mod._useFieldRepTC then
+        try
+          let cmd ← liftTermElabM mod.declareTransitionWeakeningLemma
+          elabVeilCommand cmd
+        catch ex =>
+          logWarning m!"unable to generate transition weakening lemma: {ex.toMessageData}"
+    pure mod
 
 /-- Solver-relevant options as (name, value) pairs. Used to detect when a
 check command runs under different solver options than the VCs' dischargers
