@@ -413,6 +413,22 @@ def Module.generateVCs (mod : Module) : CommandElabM Unit := do
 
 /-! ## Persistent VC registry (`veil.gen.vcRegistry`) -/
 
+/-- Strip source info (and re-anchor ident raw `Substring`s) from syntax
+about to be persisted in the VC registry. The registry's `params`/
+`statement` fields are display/stub syntax only — but syntax fresh from
+elaboration carries `SourceInfo.original` whose leading/trailing
+`Substring`s (and each ident's `rawVal`) reference the **entire source
+string**: pickling one such reference embeds the whole file text in the
+olean, so the olean's content — and with it lake's content-addressed
+import traces, i.e. every importer's up-to-date check — changes on *any*
+source edit, comments included. Sanitized syntax is position-free and
+depends only on the syntax tree itself. -/
+private partial def sanitizePersistedSyntax : Syntax → Syntax
+  | .node _ k args => .node .none k (args.map sanitizePersistedSyntax)
+  | .atom _ val => .atom .none val
+  | .ident _ _ val pre => .ident .none (toString val).toSubstring val pre
+  | .missing => .missing
+
 /-- Persist the current VC manager's induction VCs as `mod`'s VC registry
 (`vcRegistryExt`): name/action/property/kind/style, the statement syntax
 (display/stub use), and the statement elaborated to a closed `Expr` — the
@@ -452,7 +468,8 @@ def Module.persistVCRegistry (mod : Module) : CommandElabM Unit := do
           let ty ← vc.toVCStatement.type
           return { name := vc.name, «action» := m.action, property := m.property,
                    kind := m.kind, style := m.style,
-                   params := vc.params, statement := vc.statement,
+                   params := vc.params.map (⟨sanitizePersistedSyntax ·⟩),
+                   statement := ⟨sanitizePersistedSyntax vc.statement⟩,
                    «type» := ty : VCRegistryEntry }
         promise.resolve (.ok entries)
       catch ex =>
