@@ -242,6 +242,30 @@ lemma Transition.preservesInvariantsOnSuccesful_eq [Inhabited α] (act : VeilM m
   act.toTransition.preservesInvariantsIfSuccesful inv = act.preservesInvariantsIfSuccesful inv := by
   apply Transition.meetsSpecificationIfSuccessful_eq
 
+/-- Bridge from a WP-form VC theorem (`VeilM.meetsSpecificationIfSuccessfulAssuming` —
+the statement form the VC registry carries and `#gen_theorems`/`#prove_action`
+persist) to a Hoare triple on the action's derived transition, the form the
+`reachable` induction consumes. Used per composition leaf by the per-action
+preservation lemmas `#prove_action` emits and by `#gen_composition`. -/
+theorem VeilM.triple_of_meets [Inhabited α] {act : VeilM m ρ σ α} {assu : ρ → Prop}
+    {pre post : SProp ρ σ}
+    (h : act.meetsSpecificationIfSuccessfulAssuming assu pre post) :
+    ∀ r s s', assu r → pre r s → act.toTransitionDerived r s s' → post r s' := by
+  intro r s s' hassu hpre htr
+  rw [← VeilM.toTransitionDerived_sound] at htr
+  exact ((Transition.meetsSpecificationIfSuccessful_eq act _ _).mpr h) r s s' ⟨hassu, hpre⟩ htr
+
+/-- TR-form counterpart of `VeilM.triple_of_meets`: a
+`Transition.meetsSpecificationIfSuccessfulAssuming` statement (the `_tr` VC
+form) is definitionally a triple; this restates it in the same induction-facing
+shape. The transition consumed here is the generated `<act>.ext.tr`, reached
+from `toTransitionDerived` via the action's `derived_eq`. -/
+theorem Transition.triple_of_meets {tr : Transition ρ σ} {assu : ρ → Prop}
+    {pre post : SProp ρ σ}
+    (h : tr.meetsSpecificationIfSuccessfulAssuming assu pre post) :
+    ∀ r s s', assu r → pre r s → tr r s s' → post r s' :=
+  fun r s s' ha hp htr => h r s s' ⟨ha, hp⟩ htr
+
 end TransitionSemanticsTheorems
 
 section VCTheorems

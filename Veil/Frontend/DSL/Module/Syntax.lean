@@ -346,6 +346,23 @@ of the in-file `@[veil]` theorem workflow. Rejects proofs containing
 `sorry` or metavariables. -/
 scoped syntax (name := proveVC) "#prove_vc" ident ident ident (" by " tacticSeq)? : command
 
+/-- `#gen_composition <Module>`: emit, into the current namespace, the
+composition of the module's per-action preservation lemmas (the
+`step_<action>`/`init_case` lemmas `#prove_action` emits in the per-action
+proof files, which must be imported): `invariants_of_reachable` — every
+reachable state of the generated `relationalTransitionSystem` satisfies
+the assembled `Invariants` conjunction — plus one named
+`reachable_<property>` projection per invariant, in declaration order.
+Everything is `addDecl`ed (kernel-checked); no solver runs. -/
+scoped syntax (name := genComposition) "#gen_composition" ident : command
+
+/-- `#gen_proof_files <Module>`: scaffold the verified-module file family
+next to the module's defining source file — one
+`<Model>/Proofs/<Action>.lean` per action (`#prove_action`, with manual
+cells added by hand as `#prove_vc` lines) and `<Model>/Certify.lean`
+(`#gen_composition`). Existing files are never overwritten. -/
+scoped syntax (name := genProofFiles) "#gen_proof_files" ident : command
+
 /-- Run the explicit state model checker on the current module with the given
 type instantiation and theory. The optional `maxDepth` parameter limits how
 deep the breadth-first search will go before terminating.
