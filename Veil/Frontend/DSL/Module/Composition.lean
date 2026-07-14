@@ -621,4 +621,172 @@ def elabGenProofFiles : CommandElab := fun stx => do
   if ← isModelCheckCompileMode then return
   emitProofFiles stx stx[1].getId
 
+/-! ## `#veil_status` — the audit command
+
+The registry + environment walk that turns "what is proven here?" from a
+reading exercise (trust-note chains, per-file pins) into a command: per
+registry cell, is a statement-matching kernel-checked theorem in scope,
+from which Lean module, and on which axioms. Read-only — nothing is added
+to the environment and no solver runs, so it is safe anywhere (including
+under `veil.noVerify`). -/
+
+/-- What stands in for one registry cell (an (action, property)
+obligation) in the current import closure. -/
+private inductive CellVerdict where
+  /-- A statement-matching constant with a kernel-checked value is in
+  scope. `exact` is false when the statement matches definitionally rather
+  than bit-identically (manual cells elaborate their hand-written
+  statement syntax). The axiom pass downgrades a `found` cell to
+  sorry-stubbed if its closure contains `sorryAx`. -/
+  | found (thm : Name) (exact : Bool)
+  /-- A constant with a canonical cell name exists, but it does not state
+  the registry statement — it cannot stand in for the VC. -/
+  | drifted (thm : Name)
+  /-- A constant with a canonical cell name states the VC but carries no
+  kernel-checked value (an `axiom` or `opaque`) — never `real`. -/
+  | noValue (thm : Name)
+  /-- No constant with any canonical cell name is in scope. -/
+  | missing
+
+private structure CellRow where
+  «action» : Name
+  property : Name
+  verdict : CellVerdict
+
+/-- Candidate namespaces for a module's persisted cell theorems, in
+resolution order: the current namespace and its `Proofs` child (a
+`#veil_status` sitting next to the proofs), the file family's canonical
+`<Module>.Proofs`, and `<Module>` itself (in-module `#gen_theorems`
+persistence). Mirrors `resolveEmittedLemma`. -/
+private def statusNamespaces (ns modName : Name) : Array Name :=
+  #[ns, ns ++ `Proofs, modName ++ `Proofs, modName].foldl (init := #[])
+    fun a n => if a.contains n then a else a.push n
+
+/-- Order an axiom set for display: the standard axioms first, in their
+conventional `#print axioms` order, then everything else alphabetically —
+deterministic, so summary lines are `#guard_msgs`-pinnable. -/
+private def canonicalAxiomOrder (axs : Array Name) : Array Name :=
+  let std := #[``propext, ``Classical.choice, ``Quot.sound]
+  std.filter axs.contains ++
+    (axs.filter (!std.contains ·)).qsort (·.toString < ·.toString)
+
+private def renderAxioms (axs : Array Name) : String :=
+  if axs.isEmpty then "(none)"
+  else ", ".intercalate ((canonicalAxiomOrder axs).map (·.toString)).toList
+
+/-- The axiom union over `roots`, with the visited set shared across roots
+— one walk over the whole closure, the same cost class as a single
+`#print axioms` on a top-level composition. -/
+private def collectAxiomsUnion (env : Environment) (roots : Array Name) : Array Name :=
+  (roots.foldl (init := ({} : CollectAxioms.State)) fun st r =>
+    ((CollectAxioms.collect r).run env).run st |>.2).axioms
+
+/-- The exact axiom set of one constant (fresh visited set — the
+per-theorem attribution the table and the stub classification need). -/
+private def collectAxiomsOf (env : Environment) (root : Name) : Array Name :=
+  (((CollectAxioms.collect root).run env).run {}).2.axioms
+
+/-- The `#veil_status <Module>` payload. See the syntax docstring for the
+classification and output contract. -/
+def reportVeilStatus (stx : Syntax) (modName : Name) (showTable : Bool) : CommandElabM Unit := do
+  let some entries ← getVCRegistry? modName
+    | throwError "no VC registry for module `{modName}` in scope \
+        (modules with a registry: {(← vcRegistryModules).toList}). The \
+        defining module must set `veil.gen.vcRegistry` before `#gen_spec`."
+  let ns ← getCurrNamespace
+  let env ← getEnv
+  let nss := statusNamespaces ns modName
+  -- Cells in registry (declaration) order; entries of a cell primary-first,
+  -- so the WP/TR encoding that drives the normal proof path resolves first
+  -- and the other remains the fallback.
+  let mut cellKeys : Array (Name × Name) := #[]
+  let mut cellMap : Std.HashMap (Name × Name) (Array VCRegistryEntry) := {}
+  for e in entries do
+    let k := (e.action, e.property)
+    unless cellMap.contains k do cellKeys := cellKeys.push k
+    cellMap := cellMap.insert k ((cellMap[k]?.getD #[]).push e)
+  let rows : Array CellRow ← liftTermElabM <| cellKeys.mapM fun (act, prop) => do
+    let cellEntries := cellMap[(act, prop)]!
+    let (prim, alt) := cellEntries.partition (·.kind == .primary)
+    let mut fallback : Option CellVerdict := none
+    for e in prim ++ alt do
+      for nsC in nss do
+        let n := nsC ++ e.name
+        if let some info := env.find? n then
+          if !info.hasValue then
+            fallback := fallback.getD (.noValue n) |> some
+          else if info.type == e.type then
+            return { «action» := act, property := prop, verdict := .found n true }
+          else if ← Meta.isDefEq info.type e.type then
+            return { «action» := act, property := prop, verdict := .found n false }
+          else
+            fallback := fallback.getD (.drifted n) |> some
+    return { «action» := act, property := prop, verdict := fallback.getD .missing }
+  -- Axiom pass. One shared walk for the pinned union; per-theorem sets
+  -- (a re-walk per cell) only when the table shows them or a non-standard
+  -- axiom needs attributing to its cells.
+  let foundThms := rows.filterMap fun r =>
+    match r.verdict with | .found t _ => some t | _ => none
+  let unionAxs := collectAxiomsUnion env foundThms
+  let std : Array Name := #[``propext, ``Classical.choice, ``Quot.sound]
+  let clean := unionAxs.all std.contains
+  let perRow : Std.HashMap Name (Array Name) :=
+    if showTable || !clean then
+      foundThms.foldl (init := {}) fun m t => m.insert t (collectAxiomsOf env t)
+    else {}
+  let isStubbed := fun (t : Name) => (perRow[t]?.getD #[]).contains ``sorryAx
+  let renderRow := fun (r : CellRow) =>
+    let cell := s!"{r.action} {r.property}"
+    match r.verdict with
+    | .found t exact =>
+      let status :=
+        if isStubbed t then "sorry-stubbed"
+        else if exact then "real" else "real (defeq)"
+      let src := match env.getModuleIdxFor? t with
+        | some idx => (env.header.moduleNames[idx]!).toString
+        | none => "(this file)"
+      let axs := match perRow[t]? with
+        | some a => renderAxioms a
+        | none => "—"
+      s!"{cell} | {status} | {t} | {src} | {axs}"
+    | .drifted t => s!"{cell} | statement-drift | {t} | — | —"
+    | .noValue t => s!"{cell} | axiom-stand-in | {t} | — | —"
+    | .missing => s!"{cell} | registry-only | — | — | —"
+  let isReal := fun (r : CellRow) =>
+    match r.verdict with | .found t _ => !isStubbed t | _ => false
+  let nReal : Nat := rows.foldl (init := 0) fun n r => if isReal r then n + 1 else n
+  if showTable then
+    let header := s!"#veil_status {modName} ({rows.size} cells): \
+      action property | status | theorem | defined in | axioms"
+    logInfoAt stx <| "\n".intercalate (header :: (rows.map renderRow).toList)
+  else
+    let problems := rows.filter (!isReal ·)
+    unless problems.isEmpty do
+      logWarningAt stx <| "\n".intercalate
+        (s!"#veil_status {modName}: {problems.size} cell(s) without a real \
+          theorem in scope:" :: (problems.map renderRow).toList)
+  let mut breakdown : Array String := #[]
+  let categories : Array (String × (CellVerdict → Bool)) := #[
+    ("sorry-stubbed", fun v => match v with | .found t _ => isStubbed t | _ => false),
+    ("statement-drift", fun v => match v with | .drifted _ => true | _ => false),
+    ("axiom-stand-in", fun v => match v with | .noValue _ => true | _ => false),
+    ("registry-only", fun v => match v with | .missing => true | _ => false)]
+  for (word, pred) in categories do
+    let n := rows.foldl (init := (0 : Nat)) fun n r => if pred r.verdict then n + 1 else n
+    if n > 0 then breakdown := breakdown.push s!"{n} {word}"
+  let breakdownStr :=
+    if breakdown.isEmpty then "" else s!" ({", ".intercalate breakdown.toList})"
+  logInfoAt stx m!"#veil_status {modName}: {nReal}/{rows.size} \
+    real{breakdownStr}; axioms: {renderAxioms unionAxs}"
+
+@[command_elab Veil.veilStatus]
+def elabVeilStatus : CommandElab := fun stx => do
+  withTraceNode `veil.perf.elaborator.veilStatus (fun _ => return "#veil_status") do
+    if ← isModelCheckCompileMode then return
+    let showTable ←
+      if stx[2].isNone then pure false
+      else if stx[2][0].getId == `table then pure true
+      else throwErrorAt stx[2] "expected `table` (or nothing) after the module name"
+    reportVeilStatus stx stx[1].getId showTable
+
 end Veil
