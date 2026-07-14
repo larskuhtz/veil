@@ -285,20 +285,23 @@ register_option veil.lazyWitnessRegen : Bool := {
 
 register_option veil.gen.statementOnlyTheorems : Bool := {
   defValue := false
-  descr := "If true, `#gen_theorems` persists EVERY proven VC as a \
-  statement-only stub (a `sorryAx` of its statement), regardless of trust \
-  mode — including proof-reconstruction runs whose witnesses are real, \
-  kernel-checked proofs. Use this when the module is verified with \
-  `veil.smt.trust false` (so every proof IS kernel-checked at sweep time \
-  and the solver's unsat verdicts are not trusted) but the full proof \
-  terms are too large to retain in the environment and olean — at \
-  ~4 000 VCs with ~85 K-object reconstructed witnesses, real-proof \
-  persistence needs roughly twice the memory of the sweep itself. The \
-  persisted theorems' `sorryAx` then labels statement-only *persistence*, \
-  not solver trust; downstream axiom pins must use the four-axiom form and \
-  should document that reading. Mutually exclusive with \
+  descr := "If true, `#gen_theorems` persists statement-only stubs (a \
+  `sorryAx` of each VC statement) instead of proofs — and does so \
+  SOLVE-FREE: it neither starts nor awaits any discharger, since the \
+  statements exist from `#gen_spec`'s SMT-free VC generation and a stub \
+  carries no verification claim (both the WP and TR encodings of every \
+  cell are stubbed; VCs a preceding check command terminally failed are \
+  skipped). This is a compatibility mode: the preferred statement carrier \
+  is the claim-free VC registry (`veil.gen.vcRegistry`), which importing \
+  files can re-prove for real (`#prove_action`). Historical note: \
+  previously this mode awaited the full sweep and \
+  stubbed exactly the proven VCs, so a stub certified a checked-then- \
+  discarded proof — that reading is dead, a stub now certifies nothing. \
+  Downstream axiom pins over stubs show `sorryAx`; anything real must be \
+  re-proven from the registry. Mutually exclusive with \
   `veil.gen.streamTheorems` in intent (retention is pointless when only \
-  statements are persisted)."
+  statements are persisted), and rejected by `#prove_action` (a \
+  proof-persistence command must never emit stubs)."
 }
 
 register_option veil.gen.streamTheorems : Bool := {
