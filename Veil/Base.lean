@@ -50,12 +50,15 @@ def veilDefaultOptions : List (Name × DataValue) := [
   (`maxRecDepth, DataValue.ofNat 1024),
   -- Needed because the model checker produces the code for the transition
   -- system (partly) via typeclass inference.
-  -- 500000 → 1000000: `#gen_state` on a ~50-component module sits at the
-  -- 500000 boundary; a file-level
-  -- `set_option maxHeartbeats` did not reach the failing `isDefEq`
-  -- (elaboration inside the module machinery), so the module default is the
-  -- effective knob.
-  (`maxHeartbeats, DataValue.ofNat 1000000),
+  -- Back to 500000: an earlier 1000000
+  -- raise was for `#gen_state` on a ~50-component module sitting at the
+  -- boundary — but this module default applies to the WHOLE module
+  -- elaboration (every discharger captures it at `#gen_spec`), and a global
+  -- heartbeat doubling is the prime suspect for a measured sweep-wall
+  -- regression. The `#gen_state` raise now lives scoped in the elaborator
+  -- (`Module.ensureStateIsDefined`), the one site that needs it; a
+  -- file-level `set_option` does not reach that site.
+  (`maxHeartbeats, DataValue.ofNat 500000),
   (`synthInstance.maxSize, DataValue.ofNat 4096),
 ]
 
@@ -352,9 +355,23 @@ register_option veil.cache.dir : String := {
   ever skips proof *search*, never checking)."
 }
 
+register_option veil.cache.maxAgeDays : Nat := {
+  defValue := 14
+  descr := "Age cutoff (days) for proof-cache entries (`veil.cache.proofs`; \
+  At the first successful store of a process, \
+  entries whose file modification time is older than this are deleted \
+  (plus day-old `.tmp` strays). Store-time only, once per process: a \
+  fully-warm build (no stores) never pays the directory scan. Hits do NOT \
+  refresh an entry's mtime, so an entry that only ever hits re-solves once \
+  per cutoff period and re-enters fresh — the price of not touching files \
+  on the hit path. 0 disables GC entirely."
+}
+
 register_option veil.cache.kernelReplay : Bool := {
-  defValue := false
-  descr := "If true, proof-cache hits (`veil.cache.proofs`) are checked by \
+  defValue := true
+  descr := "If true (default — measured 3.3x cheaper than \
+  the elaborator re-check at large-witness scale, and stronger), \
+  proof-cache hits (`veil.cache.proofs`) are checked by \
   the KERNEL instead of the elaborator. \
   Persistence commands (`#prove_vc` and `#prove_action` cells) consult \
   the cache at the command level and hand the cached \
