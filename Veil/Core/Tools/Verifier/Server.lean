@@ -520,4 +520,57 @@ def addProvenTheoremsInDependencyOrder (filter : VCMetadata → Bool) : CommandE
       stubs (`veil.gen.statementOnlyTheorems`): their proofs were {checked} \
       during the sweep, then discarded."
 
+/-- Solve-free statement-stub pass — the `veil.gen.statementOnlyTheorems`
+path of `#gen_theorems`: persist every generated
+induction VC matching `filter` as a statement-only `sorryAx` stub *without
+starting or awaiting any discharger*. The statements exist from `#gen_spec`'s
+SMT-free VC generation, and a stub carries no verification claim — so nothing
+needs solving to emit one. Consequences of solve-freedom:
+
+* **Both encodings of a cell are stubbed** (the WP and TR forms are distinct
+  statements under distinct names, `<action>_<prop>` / `<action>_<prop>_tr`) —
+  there is no "which form proved" fact to select by, and neither stub claims
+  anything.
+* VCs that already reached a terminal non-proven status (a check command ran
+  earlier in this file and the VC failed: ❌/💥/⏱/❓) are deliberately NOT
+  stubbed — a theorem-shaped constant for a known-failed VC invites accidental
+  reliance — and are counted in the summary instead.
+* Trace VCs are skipped, as in the proven-theorem batch pass.
+
+The summary reports how many stubs had in fact been proven by the time of
+emission, but that count is incidental (e.g. the sweep a preceding
+`#check_invariants` ran) — the stubs themselves never certify a sweep. Must
+run under `veil.gen.statementOnlyTheorems` (it drives the stub path of
+`addProvenVCTheorem`). -/
+def addStatementStubs (filter : VCMetadata → Bool) : CommandElabM Unit := do
+  unless veil.gen.statementOnlyTheorems.get (← getOptions) do
+    throwError "addStatementStubs requires `veil.gen.statementOnlyTheorems`"
+  let mgr ← vcManager.atomically fun ref => ref.get
+  let vcs := mgr.nodes.values.toArray.qsort (·.uid < ·.uid)
+  let mut stubbed := 0
+  let mut proven := 0
+  let mut skippedFailed := 0
+  for vc in vcs do
+    unless vc.metadata matches .induction _ do continue
+    unless filter vc.metadata do continue
+    match mgr.vcFinalStatus? vc.uid with
+    | some .proven =>
+      addProvenVCTheorem vc none none
+      stubbed := stubbed + 1
+      proven := proven + 1
+    | some _ => skippedFailed := skippedFailed + 1
+    | none =>
+      addProvenVCTheorem vc none none
+      stubbed := stubbed + 1
+  let mut msg := m!"persisted {stubbed} VC statements as statement-only \
+    `sorryAx` stubs (`veil.gen.statementOnlyTheorems`) — solve-free: a stub \
+    carries no verification claim"
+  if proven > 0 then
+    msg := msg ++ m!" ({proven} of them happened to be proven by this file's \
+      sweep at emission time; the stubs do not record that)"
+  if skippedFailed > 0 then
+    msg := msg ++ m!"; {skippedFailed} VCs with a non-proven terminal status \
+      were not stubbed"
+  logInfo msg
+
 end Veil.Verifier
