@@ -347,6 +347,15 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
     elabVeilCommand initCmd
     let (rtsCmd, mod) ← Module.assembleRelationalTransitionSystem mod
     elabVeilCommand rtsCmd
+    -- Optionally emit the per-action executable extraction (for per-label
+    -- execution / trace-conformance monitoring) WITHOUT the O(n^k)
+    -- label-enumeration scaffolding (`Enumeration`/`FinEncodableInjOnly`,
+    -- ActionTag, `EnumerableTransitionSystem`). Eager only when
+    -- `modelCheckScaffolding` is off; with it on, the `#model_check` path
+    -- (`ensureExecutableModelCheckerDefinitions`) already produces the same
+    -- extraction on demand (running it here too would redeclare it).
+    if (← isExecutableActionsEnabled) && !(← isModelCheckScaffoldingEnabled) then
+      Extract.runGenExtractCommand mod
     pure mod
   unless (← isModelCheckCompileMode) do
     Verifier.runManager
