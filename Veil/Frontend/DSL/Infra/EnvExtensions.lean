@@ -128,6 +128,14 @@ def isModelCheckCompileMode [Monad m] [MonadOptions m] : m Bool := do
 def isModelCheckScaffoldingEnabled [Monad m] [MonadOptions m] : m Bool := do
   return veil.gen.modelCheckScaffolding.get (← getOptions)
 
+/-- Whether the per-action *executable* extraction (`<action>.ext` and the
+    label-dispatched `assembledNextAct`) should be emitted at `#gen_spec`, for
+    per-label execution of actions (e.g. trace-conformance monitoring) WITHOUT
+    the O(n^k) label-enumeration scaffolding of `#model_check`. See
+    `veil.gen.executableActions` in `Veil/Base.lean`. -/
+def isExecutableActionsEnabled [Monad m] [MonadOptions m] : m Bool := do
+  return veil.gen.executableActions.get (← getOptions)
+
 /-- Log an error, but only if not in model check compilation mode.
     In compilation mode, errors would cause lake build to fail. -/
 def veilLogError [Monad m] [MonadOptions m] [AddMessageContext m] [MonadLog m]
