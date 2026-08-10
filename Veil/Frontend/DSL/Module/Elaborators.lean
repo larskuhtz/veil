@@ -393,8 +393,12 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
   -- Generate ActionTag type for symbolic model checking
   -- NOTE: ActionTag is query-local (not a module sort), but we generate the
   -- axiomatisation class and concrete type here for convenience
+  -- Gated on `veil.gen.modelCheckScaffolding` (see Veil/Base.lean): the
+  -- enum axiomatisation + `FinEncodableInjOnly` instances generated here are
+  -- O(n^k) in the number of actions and explode for protocols with ~30+
+  -- actions. Disabling leaves `#check_invariants` / `#check_action` supported.
   let actionNames := mod.actions.map (fun (a : ProcedureSpecification) => Lean.mkIdent a.name)
-  if !actionNames.isEmpty && !(← isModelCheckCompileMode) then
+  if !actionNames.isEmpty && !(← isModelCheckCompileMode) && (← isModelCheckScaffoldingEnabled) then
     let (className, classDecl) ← mkEnumAxiomatisation actionTagType actionNames
     elabVeilCommand classDecl
     for cmd in (← mkEnumConcreteType actionTagType actionNames) do
@@ -418,6 +422,15 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
     elabVeilCommand initCmd
     let (rtsCmd, mod) ← Module.assembleRelationalTransitionSystem mod
     elabVeilCommand rtsCmd
+    -- Optionally emit the per-action executable extraction (for per-label
+    -- execution / trace-conformance monitoring) WITHOUT the O(n^k)
+    -- label-enumeration scaffolding (`Enumeration`/`FinEncodableInjOnly`,
+    -- ActionTag, `EnumerableTransitionSystem`). Eager only when
+    -- `modelCheckScaffolding` is off; with it on, the `#model_check` path
+    -- (`ensureExecutableModelCheckerDefinitions`) already produces the same
+    -- extraction on demand (running it here too would redeclare it).
+    if (← isExecutableActionsEnabled) && !(← isModelCheckScaffoldingEnabled) then
+      Extract.runGenExtractCommand mod
     pure mod
   unless (← isModelCheckCompileMode) do
     Verifier.runManager
@@ -441,6 +454,15 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
   return { mod with _specFinalizedAt := some stx }
 
 private def Module.ensureExecutableModelCheckerDefinitions (mod : Module) : CommandElabM Unit := do
+  -- The EnumerableTransitionSystem (and the `Enumeration`/`FinEncodableInjOnly`
+  -- `Label` instances it consumes) are only generated when
+  -- `veil.gen.modelCheckScaffolding` is enabled. With it off, `#model_check`
+  -- is unavailable by design; fail with a clear message rather than a
+  -- confusing missing-instance error from `assembleEnumerableTransitionSystem`.
+  unless (← isModelCheckScaffoldingEnabled) do
+    throwError "`#model_check` requires `veil.gen.modelCheckScaffolding` (currently false). \
+      Re-enable it to generate the EnumerableTransitionSystem. `#check_invariants` \
+      and `#check_action` do not require it."
   if (← getEnv).contains (mod.name ++ enumerableTransitionSystemName) then
     return
   let savedState ← get

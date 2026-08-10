@@ -197,6 +197,20 @@ to `true` during that compilation to:
 def isModelCheckCompileMode [Monad m] [MonadOptions m] : m Bool := do
   return veil.__modelCheckCompileMode.get (← getOptions)
 
+/-- Whether model-check scaffolding (FinEncodableInjOnly / Enumeration on
+    `Label`, the ActionTag enum, and the EnumerableTransitionSystem) should be
+    generated. See `veil.gen.modelCheckScaffolding` in `Veil/Base.lean` for the
+    rationale. -/
+def isModelCheckScaffoldingEnabled [Monad m] [MonadOptions m] : m Bool := do
+  return veil.gen.modelCheckScaffolding.get (← getOptions)
+
+/-- Whether the per-action *executable* extraction (`<action>.ext` and the
+    label-dispatched `assembledNextAct`) should be emitted at `#gen_spec`, for
+    per-label execution of actions (e.g. trace-conformance monitoring) WITHOUT
+    the O(n^k) label-enumeration scaffolding of `#model_check`. See
+    `veil.gen.executableActions` in `Veil/Base.lean`. -/
+def isExecutableActionsEnabled [Monad m] [MonadOptions m] : m Bool := do
+  return veil.gen.executableActions.get (← getOptions)
 /-- Whether verification is disabled for this elaboration: the `veil.noVerify`
     option, or the `VEIL_NO_VERIFY` environment variable (any value except
     empty or `0`). Under this mode `#gen_spec` generates VC statements but

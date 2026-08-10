@@ -1,5 +1,6 @@
 import Veil.Frontend.DSL.Module.Util.LocalRProp
 import Veil.Core.Tools.ModelChecker.TransitionSystem
+import Veil.Frontend.DSL.Infra.EnvExtensions
 
 open Lean Parser Elab Command Term Meta Tactic
 
@@ -146,14 +147,25 @@ def Module.labelTypeStx [Monad m] [MonadQuotation m] [MonadError m] (mod : Modul
 
 /-! ## Label Assembly (Private) -/
 
-private def Module.assembleLabelDef [Monad m] [MonadQuotation m] [MonadError m] (mod : Module) : m (Command × Module) := do
+private def Module.assembleLabelDef [Monad m] [MonadQuotation m] [MonadError m] [MonadOptions m] (mod : Module) : m (Command × Module) := do
   mod.throwIfAlreadyDeclared labelTypeName
   let labelT ← mod.labelTypeStx
   let actionNames := Std.HashSet.ofArray $ mod.actions.map (·.name)
   let ctors ← mod.actions.mapM (fun a => do
     `(Command.ctor| | $(mkIdent a.name):ident $(← a.binders)* : $labelT ))
   let labelDef ← do
-    let instances := #[``DecidableEq,``Repr, ``ToJson, ``Hashable, ``Veil.Enumeration, ``Veil.FinEncodableInjOnly].map Lean.mkIdent
+    -- `Enumeration` and `FinEncodableInjOnly` are consumed only by
+    -- `#model_check`. Their derivation on `Label` is O(n^k) in the number of
+    -- action constructors and explodes Lean's whnf heartbeat budget for
+    -- protocols with ~30+ actions. Skip them when
+    -- `veil.gen.modelCheckScaffolding` is false — `#check_invariants` and
+    -- `#check_action` remain sound and supported.
+    let baseInstances := #[``DecidableEq, ``Repr, ``ToJson, ``Hashable].map Lean.mkIdent
+    let scaffoldingInstances :=
+      if (← isModelCheckScaffoldingEnabled)
+      then #[``Veil.Enumeration, ``Veil.FinEncodableInjOnly].map Lean.mkIdent
+      else #[]
+    let instances := baseInstances ++ scaffoldingInstances
     if ctors.isEmpty then
       `(inductive $labelType $(← mod.uninterpretedParamBinders)* where $[$ctors]* deriving $[$instances:ident],*)
     else
@@ -209,7 +221,7 @@ def Module.mkInstantiationStructure [Monad m] [MonadQuotation m] [MonadError m] 
 
 /-! ## Public Label Assembly -/
 
-def Module.assembleLabel [Monad m] [MonadQuotation m] [MonadError m] (mod : Module) : m (Array Command × Module) := do
+def Module.assembleLabel [Monad m] [MonadQuotation m] [MonadError m] [MonadOptions m] (mod : Module) : m (Array Command × Module) := do
   let (labelDef, mod) ← mod.assembleLabelDef
   let (casesLemma, mod) ← mod.assembleLabelCasesLemma
   return (#[labelDef, casesLemma], mod)
