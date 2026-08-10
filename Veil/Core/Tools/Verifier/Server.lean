@@ -21,6 +21,14 @@ exceptions it catches are invisible to the editor; they are recorded here and
 surfaced as warnings by `awaitFilteredWithLogging` on its next poll. -/
 initialize managerLoopErrors : IO.Ref (Array String) ← IO.mkRef #[]
 
+/-- Solver-relevant option values as they were when the named module's VCs
+(and their dischargers) were generated, i.e. at `#gen_spec`. Dischargers
+capture their elaboration context — including options — at creation time, so
+a `set_option veil.smt.* ... in #check_invariants` does *not* affect solving;
+check commands compare against this record to warn about such silent
+mismatches (`warnIfSolverOptionsChangedSinceVCGen`). -/
+initialize solverOptionsAtVCGen : IO.Ref (Option (Name × Array (String × String))) ← IO.mkRef none
+
 def sendNotification (notification : ManagerNotification VCMetadata SmtResult) : CommandElabM Unit := do
   let _ ← vcManagerCh.send notification
 
