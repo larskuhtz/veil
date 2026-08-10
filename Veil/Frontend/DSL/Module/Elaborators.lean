@@ -8,6 +8,7 @@ import Veil.Frontend.DSL.Action.Elaborators
 import Veil.Frontend.DSL.State.SubState
 import Veil.Frontend.DSL.State.ConcreteRegistry
 import Veil.Frontend.DSL.Module.VCGen
+import Veil.Frontend.DSL.Module.Composition
 import Veil.Core.Tools.Verifier.Server
 import Veil.Core.Tools.Verifier.Results
 import Veil.Core.UI.Verifier.VerificationResults
@@ -711,6 +712,10 @@ def elabProveAction : CommandElab := fun stx => do
     else
       logInfoAt stx m!"#prove_action {modName} {actionName}: every cell was \
         already proven in namespace `{ns}`; nothing to solve"
+    -- `#gen_composition`: with every cell persisted, emit the one
+    -- lemma the composition consumes — the per-action preservation lemma
+    -- (`step_<action>` / `init_case`), kernel-checked like everything else.
+    emitPreservationLemma stx modName actionName
 
 @[command_elab Veil.proveVC]
 def elabProveVC : CommandElab := fun stx => do
