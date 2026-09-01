@@ -508,7 +508,7 @@ def addProvenTheoremsInDependencyOrder (filter : VCMetadata → Bool) : CommandE
       `veil.gen.streamTheorems true` before `#gen_spec` instead: dischargers \
       then retain their witnesses and `#gen_theorems` persists each one \
       incrementally while the sweep is still running."
-  let mut persisted := 0
+  let mut persisted : Nat := 0
   for vcId in mgr.vcIdsInDependencyOrder filter do
     if let some (vc, (witness?, regen?)) := mgr.provenWitnessOrRegen? vcId then
       addProvenVCTheorem vc witness? regen?

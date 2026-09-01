@@ -98,7 +98,7 @@ def Discharger.fromTermWith (term : Term) (vcStatement : VCStatement)
     (mkResult : Std.CloseableChannel ((Name × Nat) × Smt.AsyncOutput) →
       Witness ⊕ Exception → Nat → TermElabM (DischargerResult SmtResult))
     (traceLabel : String := "discharger")
-    (promiseResult : DischargerResult SmtResult → DischargerResult SmtResult := id)
+    (promiseResult : DischargerResult SmtResult → DischargerResult SmtResult := fun r => r)
     : CommandElabM (Discharger SmtResult) := do
   let cancelTk ← IO.CancelToken.new
   let smtCh ← Std.CloseableChannel.new
