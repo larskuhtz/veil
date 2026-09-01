@@ -238,7 +238,18 @@ callers that render repeatedly while verification is running should pass
 def mkVCResult [Monad m] [MonadError m] [MonadLiftT BaseIO m] [MonadLiftT CoreM m] (mgr : VCManager VCMetaT ResultT) (vcId : VCId) (includeTheoremText : Bool := true) : m (VCResult VCMetaT ResultT) := do
   let .some vc := mgr.nodes[vcId]? | throwError s!"mkVCResult: VC {vcId} not found in manager"
   let timing ← mkTimingData mgr vc
-  let theoremText ← if includeTheoremText then some <$> liftM (mkTheoremText vc) else pure none
+  -- Even when the caller wants theorem text, a *proven* VC can never need it:
+  -- `undischargedTheoremTexts` collects only unknown/error/timeout VCs, and the
+  -- widget's click-to-insert stub is meaningless for a VC that is already proven.
+  -- Skipping those saves one `Lean.PrettyPrinter.ppCommand` per proven VC on
+  -- every full render — the overwhelming majority on a large module (a ~3800-VC
+  -- sweep pretty-printed ~3800 stubs to serve a few dozen consumers).
+  -- Deliberately conservative: only `.proven` is skipped, so a disproven VC
+  -- still offers its stub for hand-proving after a counterexample.
+  let isProven := match mgr._doneWith[vcId]? with | some .proven => true | _ => false
+  let theoremText ← if includeTheoremText && !isProven then
+      some <$> liftM (mkTheoremText vc)
+    else pure none
   return {
     id := vcId
     name := vc.name
