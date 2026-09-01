@@ -463,7 +463,7 @@ def emitComposition (stx : Syntax) (modName : Name) : CommandElabM Unit := do
                       (c.binders ++ #[th, s1, s2, hassu, ih] ++ cargs ++ #[htr']))
               let casesName := modName ++ labelTypeName ++ `casesOn
               let casesInfo ← getConstInfo casesName
-              let lvls := casesInfo.levelParams.map fun _ => levelZero
+              let lvls := casesInfo.levelParams.map fun _ => Level.zero
               let casesApp := mkAppN (mkConst casesName lvls)
                 (lblParams ++ #[motive2, l] ++ branches)
               mkLambdaFVars #[l, htr] (mkApp casesApp htr)
@@ -472,7 +472,7 @@ def emitComposition (stx : Syntax) (modName : Name) : CommandElabM Unit := do
           mkLambdaFVars #[s1, s2, hr, hnext, ih] exApp
       let recName := mkRecName ``RelationalTransitionSystem.reachable
       let recInfo ← getConstInfo recName
-      let recLvls := recInfo.levelParams.map fun _ => levelZero
+      let recLvls := recInfo.levelParams.map fun _ => Level.zero
       let recApp := mkAppN (mkConst recName recLvls)
         #[c.ρ, c.σ, c.lbl, c.rtsApp, th, motive, initMinor, stepMinor, st, h]
       let _ ← addTheoremIdempotent iorName stmt (← mkLambdaFVars outerFVars recApp)
@@ -680,17 +680,26 @@ private def renderAxioms (axs : Array Name) : String :=
   if axs.isEmpty then "(none)"
   else ", ".intercalate ((canonicalAxiomOrder axs).map (·.toString)).toList
 
-/-- The axiom union over `roots`, with the visited set shared across roots
-— one walk over the whole closure, the same cost class as a single
-`#print axioms` on a top-level composition. -/
-private def collectAxiomsUnion (env : Environment) (roots : Array Name) : Array Name :=
-  (roots.foldl (init := ({} : CollectAxioms.State)) fun st r =>
-    ((CollectAxioms.collect r).run env).run st |>.2).axioms
+/-- The axiom union over `roots` — one walk over the whole closure, the same
+cost class as a single `#print axioms` on a top-level composition.
 
-/-- The exact axiom set of one constant (fresh visited set — the
-per-theorem attribution the table and the stub classification need). -/
-private def collectAxiomsOf (env : Environment) (root : Name) : Array Name :=
-  (((CollectAxioms.collect root).run env).run {}).2.axioms
+Lean 4.32 made `CollectAxioms.collect`/`.State` private and replaced them with
+the public `Lean.collectAxioms`, which caches per-constant results in a
+persistent environment extension. The cross-root sharing this function used to
+arrange by threading one `CollectAxioms.State` is therefore now done by that
+cache, and a plain union has the same cost class. -/
+private def collectAxiomsUnion [Monad m] [MonadEnv m] (roots : Array Name) :
+    m (Array Name) := do
+  let mut acc : NameSet := {}
+  for r in roots do
+    for a in ← collectAxioms r do
+      acc := acc.insert a
+  return acc.toArray
+
+/-- The exact axiom set of one constant — the per-theorem attribution the
+table and the stub classification need. -/
+private def collectAxiomsOf [Monad m] [MonadEnv m] (root : Name) : m (Array Name) :=
+  collectAxioms root
 
 /-- The `#veil_status <Module>` payload. See the syntax docstring for the
 classification and output contract. -/
@@ -719,7 +728,12 @@ def reportVeilStatus (stx : Syntax) (modName : Name) (showTable : Bool) : Comman
       for nsC in nss do
         let n := nsC ++ e.name
         if let some info := env.find? n then
-          if !info.hasValue then
+          -- Lean 4.32 gave `ConstantInfo.hasValue` an `allowOpaque := false`
+          -- default, under which a *theorem* reports no value — so every real
+          -- cell theorem would be classified as an `axiom-stand-in`. The test
+          -- here is "is this an axiom rather than a proof", which is exactly
+          -- `allowOpaque := true`.
+          if !info.hasValue (allowOpaque := true) then
             fallback := fallback.getD (.noValue n) |> some
           else if info.type == e.type then
             return { «action» := act, property := prop, verdict := .found n true }
@@ -735,13 +749,13 @@ def reportVeilStatus (stx : Syntax) (modName : Name) (showTable : Bool) : Comman
   -- axiom needs attributing to its cells.
   let foundThms := rows.filterMap fun r =>
     match r.verdict with | .found t _ => some t | _ => none
-  let unionAxs := collectAxiomsUnion env foundThms
+  let unionAxs ← collectAxiomsUnion foundThms
   let std : Array Name := #[``propext, ``Classical.choice, ``Quot.sound]
   let clean := unionAxs.all std.contains
-  let perRow : Std.HashMap Name (Array Name) :=
+  let perRow : Std.HashMap Name (Array Name) ←
     if showTable || !clean then
-      foundThms.foldl (init := {}) fun m t => m.insert t (collectAxiomsOf env t)
-    else {}
+      foundThms.foldlM (init := {}) fun m t => return m.insert t (← collectAxiomsOf t)
+    else pure {}
   let isStubbed := fun (t : Name) => (perRow[t]?.getD #[]).contains ``sorryAx
   let renderRow := fun (r : CellRow) =>
     let cell := s!"{r.action} {r.property}"
