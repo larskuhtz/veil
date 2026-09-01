@@ -1433,13 +1433,24 @@ def withProofCache (inner : DesugarTacticM Unit) : DesugarTacticM Unit := do
         trace[veil.cache] "stale cache entry (kernel check failed) — re-solving"
     else
       -- Elaborator-level re-check, phase-timed.
+      --
+      -- Both the `Meta.check` and the `isDefEq` run under
+      -- `withBackwardsCompatibility`: `withProofCache` wraps the solve entry
+      -- points at dispatch (`elabVeilTactics`), i.e. OUTSIDE the
+      -- `elabVeilSolve` / `elabVeilSmt` bodies where upstream applies the
+      -- Lean 4.32 legacy-defEq shim. Unshimmed, this validation runs under
+      -- strict 4.32 defEq while the fresh solves that PRODUCED the entries ran
+      -- under the legacy discipline — so hits would silently degrade to
+      -- misses. Correctness is unaffected either way; the feature just stops
+      -- paying, with a green build. (The kernel-replay branch above is immune:
+      -- `addDecl` does not consult these options.)
       let tc0 ← IO.monoNanosNow
       let checkOk ← goal.withContext do
-        try Meta.check entry.proof; pure true catch _ => pure false
+        try withBackwardsCompatibility (Meta.check entry.proof); pure true catch _ => pure false
       let tc1 ← IO.monoNanosNow
       let ok ← if checkOk then
           goal.withContext do
-            try Meta.isDefEq (← Meta.inferType entry.proof) stmt
+            try withBackwardsCompatibility <| Meta.isDefEq (← Meta.inferType entry.proof) stmt
             catch _ => pure false
         else
           pure false
