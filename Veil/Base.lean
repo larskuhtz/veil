@@ -128,18 +128,93 @@ register_option veil.solver : VeilSolver := {
 register_option veil.smt.finiteModelFind : Bool := {
   defValue := true
   descr := "If true, the SMT solver will use finite model finding mode (finite-model-find). \
-  If you work in a decidable fragment, this will tend to speed things up."
+  If you work in a decidable fragment, this will tend to speed things up. \
+  NOTE: dischargers capture solver options at `#gen_spec` (VC generation), \
+  so this must be set before `#gen_spec`; setting it only around a check \
+  command has no effect on solving."
 }
 
 register_option veil.smt.trust : Bool := {
   defValue := true
   descr := "If true, `veil_smt` trusts unsat results from the SMT solver. \
-  If false, `veil_smt` asks the SMT backend to reconstruct Lean proofs."
+  If false, `veil_smt` asks the SMT backend to reconstruct Lean proofs. \
+  NOTE: dischargers capture solver options at `#gen_spec` (VC generation), \
+  so this must be set before `#gen_spec`; setting it only around a check \
+  command has no effect on solving."
 }
 
 register_option veil.smt.timeout : Nat := {
   defValue := 60
-  descr := "Timeout for the SMT solver in seconds. Default is 60 seconds."
+  descr := "Timeout for the SMT solver in seconds. Default is 60 seconds. \
+  NOTE: dischargers capture solver options at `#gen_spec` (VC generation), \
+  so this must be set before `#gen_spec`; setting it only around a check \
+  command has no effect on solving."
+}
+
+register_option veil.smt.seed : Nat := {
+  defValue := 0
+  descr := "Random seed for the SMT solver (cvc5 `seed` and `sat-random-seed`). \
+  0 (the default) leaves the solver's own default seed in place; any other \
+  value is passed through. Retry attempts (`veil.smt.retries`) perturb this \
+  to escape seed-dependent e-matching divergence. Like all solver options, \
+  must be set before `#gen_spec`."
+}
+
+register_option veil.smt.retries : Nat := {
+  defValue := 1
+  descr := "How many times to re-dispatch a VC whose SMT query timed out, \
+  before reporting ⏱. Each retry uses a fresh random seed (`veil.smt.seed` = \
+  attempt index) and a budget of `veil.smt.retryTimeout` seconds. Retries \
+  only fire after a *timeout* (not after `sat`, genuine `unknown`, or \
+  errors) and are reported distinctly in the summary so flakiness stays \
+  visible. Set to 0 to disable. Must be set before `#gen_spec`."
+}
+
+register_option veil.smt.retryTimeout : Nat := {
+  defValue := 120
+  descr := "Timeout (in seconds) for retry attempts (see `veil.smt.retries`). \
+  Timeout-then-fast-success is a seed artifact: such queries either finish \
+  quickly under a fresh seed or never, so a short budget avoids burning \
+  another full `veil.smt.timeout` on genuinely divergent queries. \
+  Must be set before `#gen_spec`."
+}
+
+register_option veil.gen.strictLocalSimp : Bool := {
+  defValue := true
+  descr := "If true (default), failing to synthesize the local \
+  pre-simplification infrastructure (LocalTheoryProp/LocalRProp simplified \
+  cores and the local `meetsSpecificationIfSuccessful` theorems) at \
+  `#gen_spec` is a hard error. Without this infrastructure every VC \
+  re-simplifies the full assembled assertion clump from scratch, silently \
+  degrading `#check_invariants` roughly 10x on large modules; the failure is \
+  usually instance-search budget exhaustion, fixed by raising \
+  `synthInstance.maxHeartbeats`/`synthInstance.maxSize`/`maxRecDepth`. \
+  Set to false to restore the old warn-and-continue behavior."
+}
+
+register_option veil.report.slowVCs : Nat := {
+  defValue := 10
+  descr := "Number of slowest verification conditions to list at the end of \
+  `#check_invariants` (ranked by individual discharger time, including failed \
+  attempts, which burn the full timeout). Set to 0 to disable the report."
+}
+
+register_option veil.report.slowVCsMinMs : Nat := {
+  defValue := 5000
+  descr := "Minimum discharge time (in milliseconds) for an attempt to appear \
+  in the slowest-VCs report; when no attempt qualifies, the report is \
+  omitted entirely. The default floor keeps `#check_invariants` output \
+  deterministic for fast specifications (e.g. under `#guard_msgs` in tests) \
+  while still surfacing the tail on long-running sweeps. Lower it to \
+  investigate moderately slow VCs."
+}
+
+register_option veil.report.nearTimeoutPercent : Nat := {
+  defValue := 50
+  descr := "In the slowest-VCs report, flag a discharge attempt as \
+  near-timeout (⚠️) when its time exceeds this percentage of \
+  `veil.smt.timeout`. Near-timeout VCs are divergence candidates: a small \
+  model change (e.g. one added invariant) may push them past the timeout."
 }
 
 register_option veil.experimental.wpCompact : Bool := {
