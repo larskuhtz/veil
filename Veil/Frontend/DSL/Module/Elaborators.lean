@@ -755,7 +755,7 @@ def elabProveVC : CommandElab := fun stx => do
     -- ♻ visibility: a hits-delta across this synchronous elaboration means
     -- the proof came from the cache (`veil.cache.proofs`), not a solve.
     let hits0 ← ProofCache.statsHits
-    liftTermElabM <| Term.withDeclName fullName do
+    let proof ← liftTermElabM <| Term.withDeclName fullName do
       let proof ← Term.elabTermEnsuringType term e.type
       Term.synthesizeSyntheticMVarsNoPostponing
       let proof ← instantiateMVars proof
@@ -766,8 +766,22 @@ def elabProveVC : CommandElab := fun stx => do
       addDecl (.thmDecl {
         name := fullName, levelParams := []
         «type» := e.type, value := proof })
+      return proof
     let t1 ← IO.monoMsNow
-    let cacheNote := if (← ProofCache.statsHits) > hits0 then " (proof ♻ from cache)" else ""
+    let wasHit := (← ProofCache.statsHits) > hits0
+    -- Populate the cache from the MANUAL-cell path. `withProofCache` (the only
+    -- other `store` call site) wraps `veil_solve_wp`/`_tr`/`_doesnotthrow`
+    -- only, so a project that discharges cells by hand — `#prove_vc … by
+    -- <tactic>`, e.g. a `grind`-based script — could read from the cache but
+    -- never write to it, and so never got a single hit.
+    --
+    -- Safe by construction: the proof is rejected above unless it is
+    -- sorry-free and metavariable-free, and `ProofCache.find?` independently
+    -- re-checks `!entry.proof.hasSorry` on the read side.
+    unless wasHit do
+      if veil.cache.proofs.get (← getOptions) then
+        let _ ← ProofCache.store (← getOptions) e.type proof (t1 - t0)
+    let cacheNote := if wasHit then " (proof ♻ from cache)" else ""
     logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} in {t1 - t0} ms{cacheNote}"
 
 

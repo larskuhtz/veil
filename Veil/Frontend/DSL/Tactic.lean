@@ -1393,7 +1393,10 @@ sorry-free. Reconstruction mode only — under `veil.smt.trust` the witness
 is `sorryAx`-based and is neither stored nor looked up. -/
 def withProofCache (inner : DesugarTacticM Unit) : DesugarTacticM Unit := do
   let opts ← getOptions
-  if !veil.cache.proofs.get opts || veil.smt.trust.get opts then
+  -- Not gated on `veil.smt.trust`: the store below already refuses any proof
+  -- that `hasSorry`, so a trusted-SMT witness can never enter the cache, and
+  -- the read side re-checks independently. See `ProofCache.replayPersist?`.
+  if !veil.cache.proofs.get opts then
     inner
     return
   let goal ← getMainGoal

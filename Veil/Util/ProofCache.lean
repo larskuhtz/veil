@@ -212,8 +212,13 @@ Two `Lean.addDecl` internals this function must handle (v4.28):
 def replayPersist? (name : Name) (levelParams : List Name) (stmt : Expr) :
     CoreM (Option Nat) := do
   let opts ← getOptions
-  if !veil.cache.proofs.get opts || !veil.cache.kernelReplay.get opts
-      || veil.smt.trust.get opts then
+  -- NB: deliberately NOT gated on `veil.smt.trust`. The gate existed because a
+  -- trusted-SMT witness carries `sorryAx`, but that is already rejected
+  -- independently on both sides — `find?` re-checks `!entry.proof.hasSorry`
+  -- below, and every `store` call site rejects sorry-carrying proofs. Gating on
+  -- it here also disabled the cache entirely for solver-free projects, which
+  -- never set `veil.smt.trust false` because they run no SMT at all.
+  if !veil.cache.proofs.get opts || !veil.cache.kernelReplay.get opts then
     return none
   if stmt.hasExprMVar || stmt.hasFVar || stmt.hasLevelMVar then
     return none
