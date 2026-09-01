@@ -145,7 +145,7 @@ def gcIfDue (opts : Options) (refPath : FilePath) : IO Unit := do
   if ← gcRan.modifyGet fun b => (b, true) then return
   try
     let now := (← refPath.metadata).modified.sec
-    let mut deleted := 0
+    let mut deleted : Nat := 0
     for e in ← (cacheDir opts).readDir do
       let m ← try e.path.metadata catch _ => continue
       let age := now - m.modified.sec
