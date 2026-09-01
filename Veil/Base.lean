@@ -126,6 +126,16 @@ register_option veil.noVerify : Bool := {
   (oleans) are consumed downstream."
 }
 
+register_option veil.gen.modelCheckScaffolding : Bool := {
+  defValue := true
+  descr := "When true (default), generate `FinEncodableInjOnly`/`Enumeration` instances on the action `Label` type (and the ActionTag enum) and assemble the `EnumerableTransitionSystem`. Required for `#model_check`. The derivation is O(n^k) in the number of actions and can blow up Lean elaboration heartbeats for protocols with many actions (~30+). Set to false to skip — `#check_invariants` and `#check_action` remain fully sound and supported; only `#model_check` becomes unavailable."
+}
+
+register_option veil.gen.executableActions : Bool := {
+  defValue := false
+  descr := "When true, `#gen_spec` also emits the per-action *executable* extraction (`<action>.ext` and the label-dispatched `assembledNextAct`), enabling per-label execution of actions — e.g. trace-conformance monitoring, where a recorded trace is replayed against the model one label at a time. Unlike `veil.gen.modelCheckScaffolding`, this does NOT generate the O(n^k) `Enumeration`/`FinEncodableInjOnly` `Label` instances, the ActionTag enum, or the `EnumerableTransitionSystem` (all of which exist to *enumerate* the label space for exhaustive `#model_check`), so it scales to protocols with many actions. Additive and orthogonal to verification. Takes eager effect only when `veil.gen.modelCheckScaffolding` is false; with scaffolding on, the same extraction is already produced on demand by the `#model_check` path."
+}
+
 inductive VeilSolver : Type where
   | smt
   | grind
