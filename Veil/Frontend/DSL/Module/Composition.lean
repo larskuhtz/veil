@@ -104,7 +104,11 @@ private def instantiateByName (declName : Name) (byName : Std.HashMap Name Expr)
   for _ in [0:512] do
     let .forallE n dom body _ := ty | break
     let some v := byName[n]? | break
-    unless ← isDefEq (← inferType v) dom do
+    -- Lean 4.32: compare under the same legacy-defeq discipline the
+    -- generation side uses (upstream shims `elabVeilSolve`/`elabVeilSmt`
+    -- and the `Simplifier` entry points, not this call site). Unshimmed,
+    -- by-name instantiation reports a spurious "different type".
+    unless ← withBackwardsCompatibility (isDefEq (← inferType v) dom) do
       throwError "canonical instantiation of `{declName}`: binder `{n}` \
         expects{indentExpr dom}\nbut the extracted value has type\
         {indentExpr (← inferType v)}"
@@ -232,7 +236,9 @@ private def remapLeadingToImplicit : Expr → Nat → Expr
 private def addTheoremIdempotent (name : Name) (stmt value : Expr) : MetaM Bool := do
   if (← getEnv).contains name then
     let info ← getConstInfo name
-    unless ← isDefEq info.type stmt do
+    -- See `instantiateByName`: shimmed for Lean 4.32 so an existing cell
+    -- theorem is recognised rather than rejected as a type mismatch.
+    unless ← withBackwardsCompatibility (isDefEq info.type stmt) do
       throwError "`{name}` already exists with a different statement — \
         refusing to overwrite. Existing:{indentExpr info.type}\nEmitting:{indentExpr stmt}"
     return false
@@ -717,7 +723,9 @@ def reportVeilStatus (stx : Syntax) (modName : Name) (showTable : Bool) : Comman
             fallback := fallback.getD (.noValue n) |> some
           else if info.type == e.type then
             return { «action» := act, property := prop, verdict := .found n true }
-          else if ← Meta.isDefEq info.type e.type then
+          -- Shimmed for Lean 4.32: without it `#veil_status` reports
+          -- "drifted" for cells that are in fact defeq-equal.
+          else if ← withBackwardsCompatibility (Meta.isDefEq info.type e.type) then
             return { «action» := act, property := prop, verdict := .found n false }
           else
             fallback := fallback.getD (.drifted n) |> some
