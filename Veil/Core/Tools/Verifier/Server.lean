@@ -550,9 +550,9 @@ def addStatementStubs (filter : VCMetadata → Bool) : CommandElabM Unit := do
     throwError "addStatementStubs requires `veil.gen.statementOnlyTheorems`"
   let mgr ← vcManager.atomically fun ref => ref.get
   let vcs := mgr.nodes.values.toArray.qsort (·.uid < ·.uid)
-  let mut stubbed := 0
-  let mut proven := 0
-  let mut skippedFailed := 0
+  let mut stubbed : Nat := 0
+  let mut proven : Nat := 0
+  let mut skippedFailed : Nat := 0
   for vc in vcs do
     unless vc.metadata matches .induction _ do continue
     unless filter vc.metadata do continue
