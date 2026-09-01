@@ -627,7 +627,12 @@ private def checkPreexistingCellTheorem (fullName : Name) (stmtType : Expr) :
     CommandElabM Unit := do
   let some info := (← getEnv).find? fullName
     | throwError "internal error: {fullName} vanished from the environment"
-  let ok ← liftTermElabM <| Meta.isDefEq info.type stmtType
+  -- Under Lean 4.32 this must run with the same legacy-defEq discipline
+  -- Veil's own generation paths use (`withBackwardsCompatibility` wraps
+  -- `elabVeilSolve`/`elabVeilSmt` and the `Simplifier` entry points).
+  -- Unshimmed, a statement the in-file sweep accepts is rejected here,
+  -- breaking the cross-file path only.
+  let ok ← liftTermElabM <| withBackwardsCompatibility <| Meta.isDefEq info.type stmtType
   unless ok do
     throwError "`{fullName}` exists but its statement differs from the \
       module's registry statement for this cell — it cannot be consumed \
