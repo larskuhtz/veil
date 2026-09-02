@@ -234,6 +234,30 @@ syntax (name := __veil_neutralize_decidable_inst) "__veil_neutralize_decidable_i
 
 syntax (name := __veil_ghost_relation_ssa) "__veil_ghost_relation_ssa" ("at" ident)? : tactic
 
+/-- Fold `Bool`-atom hypotheses into opaque `Prop`-predicate form before the
+SMT query is built (`veil.smt.foldBoolAtoms`; reconstruction mode only —
+`veil_smt` runs this when `veil.smt.trust` is false).
+
+For every local `Bool`-valued plain function variable
+`f : A₁ → ⋯ → Aₖ → Bool` (`k ≥ 0`), introduce a local definition
+`f' : A₁ → ⋯ → Aₖ → Prop := fun a⃗ => f a⃗ = true` and replace every atom
+`f a⃗ = true` in the hypotheses and the goal by `f' a⃗`. The replacement is
+definitional (zeta+beta through the `let`), so it carries no proof-term
+mass: hypotheses are re-asserted at the folded type with their old proof,
+and the goal is `change`d. Finally the definitions' bodies are hidden
+(`clearValue`), so the lean-smt pipeline and the SMT-LIB translation treat
+each `f'` as an opaque predicate.
+
+When this removes every `Bool` from the hint types and the goal, lean-smt's
+`embedding` preprocessing pass short-circuits: its whole-telescope
+single-pass `simpTarget` — whose congruence proof is the dominant component
+of every reconstruction witness (measured 65–72 % on a large case
+study) — never runs. The SMT query keeps the shape the embedding
+pass would have produced (opaque `Prop` predicates applied to the same
+arguments), and VC statements are untouched, so cached witnesses stored
+before the fold remain valid for the same statements. -/
+syntax (name := __veil_fold_bool_atoms) "__veil_fold_bool_atoms" : tactic
+
 syntax (name := veil_solve) "veil_solve" : tactic
 /-- Add local `Nonempty α` instances for every local `Inhabited α` hypothesis. -/
 syntax (name := veil_infer_nonempty) "veil_infer_nonempty" : tactic
@@ -871,6 +895,175 @@ def elabGhostRelationSSA (hyp : Option Ident) : DesugarTacticM Unit := veilWithM
   withMainContextGeneral do
   veilEvalTactic $ ← `(tactic| expose_names ; veil_dsimp +$(mkIdent `instances) only [$[$simps:ident],*])
 
+/-- Replace every atom `@Eq Bool (f a⃗) Bool.true` whose head `f` is a key of
+`repl` by `repl[f] a⃗`. Purely syntactic; the replacement is definitionally
+equal to the atom by zeta+beta through `repl[f]`'s `let`-binding. -/
+private def foldBoolAtomsInExpr (repl : Std.HashMap FVarId Expr) (e : Expr) : Expr :=
+  e.replace fun sub =>
+    match sub with
+    | .app (.app (.app (.const ``Eq _) (.const ``Bool _)) x) (.const ``Bool.true _) =>
+      match x.getAppFn with
+      | .fvar fid =>
+        match repl[fid]? with
+        | some f' => some (mkAppN f' x.getAppArgs)
+        | none => none
+      | _ => none
+    | _ => none
+
+private def foldStep (label : String) (k : MetaM α) : MetaM α := do
+  try k catch e => throwError "__veil_fold_bool_atoms[{label}]: {e.toMessageData}"
+
+/-- Rename a local hypothesis (display name only). -/
+private def renameFVarUserName (mv : MVarId) (fv : FVarId) (nm : Name) : MetaM MVarId :=
+  mv.withContext do
+    let lctx := (← getLCtx).setUserName fv nm
+    let mvNew ← mkFreshExprMVarAt lctx (← getLocalInstances) (← mv.getType)
+      .syntheticOpaque (← mv.getTag)
+    mv.assign mvNew
+    pure mvNew.mvarId!
+
+/-- Run the lean-smt preprocessing simp sets (`smt_normalize` + `embedding`)
+*hypothesis-locally* (per hypothesis and on the goal, via `simpGoal`), so
+their rewrite proofs are hypothesis-sized. Whatever these sets would later
+rewrite inside the reverted whole-telescope single-pass (`= false` leaf
+atoms, `↔`→`=`, `classical_ite_cond_congr`'s instance re-synthesis, …) is
+thereby already normal, and the in-pipeline passes match nothing — their
+telescope-sized congruence proofs never get built. Returns `false` if the
+simp closed the goal. -/
+private def preSimpLeanSmtSets : DesugarTacticM Bool := withBackwardsCompatibility do
+  let mv ← getMainGoal
+  -- The config deliberately MIRRORS the passes being prepaid: lean-smt builds
+  -- both `smt_normalize` and `embedding` with `Simp.mkContext { zeta := false,
+  -- singlePass := true }` (`Smt/Preprocess/{Normalize,Embedding}.lean`), i.e.
+  -- with `Simp.Config.instances` at its `false` default (Lean ≥ 4.32). Do NOT
+  -- add `+instances` here to match Veil's *other* simp entry points: prepaying
+  -- more than the pipeline does buys nothing (measured: identical witness
+  -- sizes) and would normalize what the in-pipeline pass leaves alone.
+  -- `classical_ite_cond_congr`'s `[Decidable c]` is synthesized by simp for the
+  -- theorem's own hypothesis, and `IteCongrSimproc` synthesizes explicitly in
+  -- its body, so neither needs `Simp.Config.instances`.
+  -- `failIfUnchanged := false` because `simpGoal` legitimately finds nothing;
+  -- running to fixpoint rather than `singlePass` is strictly stronger.
+  -- `withBackwardsCompatibility` matches the shim upstream applies to
+  -- `Simp.simp`/`dsimp`/`simpCore`/`unfold` — this is Veil's only other simp
+  -- entry point and must not diverge from them when invoked standalone.
+  let ctx ← Simp.mkVeilSimpCtx #[`smt_normalize, `embedding]
+    { zeta := false, failIfUnchanged := false }
+  let mut procs : Meta.Simp.SimprocsArray := #[]
+  for a in [`smt_normalize, `embedding] do
+    if let some ext ← Meta.Simp.getSimprocExtension? a then
+      procs := procs.push (← ext.getSimprocs)
+  let fvarIds ← mv.withContext do
+    pure <| (← getLCtx).decls.toArray.filterMap fun d? => d?.bind fun d =>
+      if d.isImplementationDetail || d.isLet then none else some d.fvarId
+  let (result?, _) ← evalOpenClassical <|
+    Meta.simpGoal mv ctx procs (simplifyTarget := true) (fvarIdsToSimp := fvarIds)
+  match result? with
+  | some (_, mv') => replaceMainGoal [mv']; return true
+  | none => replaceMainGoal []; return false
+
+@[inherit_doc __veil_fold_bool_atoms]
+def elabVeilFoldBoolAtoms : DesugarTacticM Unit := veilWithMainContext do
+  -- 0. Prepay the lean-smt leaf rewrites hypothesis-locally (see
+  -- `preSimpLeanSmtSets`). This may re-synthesize concrete `Decidable`
+  -- instances (`classical_ite_cond_congr`), so neutralize AFTER it:
+  -- every instance becomes `Classical.propDecidable <atom>`, whose
+  -- argument the fold below rewrites like any other occurrence. (A
+  -- concrete instance like `instDecidableEqBool b true : Decidable
+  -- (b = true)` contains no foldable subterm — after the fold it would
+  -- type-check only through the definitions' values, and `clearValue`
+  -- would correctly refuse.)
+  unless ← preSimpLeanSmtSets do return
+  veilEvalTactic <| ← `(tactic| __veil_neutralize_decidable_inst ! at *)
+  let mut mv ← getMainGoal
+  -- 1. Collect the local `Bool`-valued plain function variables
+  -- (non-dependent arrow chains into `Bool`, `k ≥ 0` arguments).
+  let targets ← mv.withContext do
+    let mut ts : Array LocalDecl := #[]
+    for decl in (← getLCtx) do
+      if decl.isImplementationDetail || decl.isLet then continue
+      let mut ty := decl.type
+      let mut ok := true
+      while ty.isForall do
+        if ty.bindingBody!.hasLooseBVars then ok := false; break
+        ty := ty.bindingBody!
+      if ok && ty.isConstOf ``Bool then
+        ts := ts.push decl
+    pure ts
+  if targets.isEmpty then return
+  -- 2. Introduce `f' : ⋯ → Prop := fun a⃗ => f a⃗ = true` for every target.
+  -- Unused ones are dropped again in step 6.
+  let mut repl : Std.HashMap FVarId Expr := {}
+  let mut letNames : Array Name := #[]  -- the definitions' userNames
+  for decl in targets do
+    let (value, «type») ← mv.withContext <| forallTelescope decl.type fun xs _ => do
+      let atom ← mkEq (mkAppN (mkFVar decl.fvarId) xs) (mkConst ``Bool.true)
+      return (← mkLambdaFVars xs atom, ← mkForallFVars xs (mkSort .zero))
+    -- The definition takes over the ORIGINAL userName (and the original is
+    -- renamed out of the way): on a `sat` result the model's values attach
+    -- to the definition, and the counterexample classifier
+    -- (`classifyModelValues`) matches state/theory fields by the
+    -- `st.`/`s₁.`/`th.`-prefixed display name — `adaptSmtExprType` already
+    -- converts the Prop-valued model function back to the field's Bool
+    -- shape, so counterexamples render exactly as without the fold.
+    let f'Name := decl.userName
+    mv ← foldStep "rename" <| renameFVarUserName mv decl.fvarId
+      (mkVeilImplementationDetailName decl.userName)
+    let (f', mv') ← foldStep "let" <| mv.let f'Name value «type»
+    mv := mv'
+    repl := repl.insert decl.fvarId (mkFVar f')
+    letNames := letNames.push f'Name
+  -- 3. Re-assert every hypothesis whose type contains foldable atoms, at the
+  -- folded type, with the old proof (kernel re-derives the conversion), and
+  -- clear the originals.
+  let (changed, goalFolded) ← mv.withContext do
+    let mut changed : Array (FVarId × Meta.Hypothesis) := #[]
+    for decl in (← getLCtx) do
+      if decl.isImplementationDetail || decl.isLet then continue
+      let folded := foldBoolAtomsInExpr repl decl.type
+      if folded != decl.type then
+        changed := changed.push (decl.fvarId,
+          { userName := decl.userName, «type» := folded, value := mkFVar decl.fvarId })
+    pure (changed, foldBoolAtomsInExpr repl (← mv.getType))
+  let (_, mv') ← foldStep "assert" <| mv.assertHypotheses (changed.map (·.2))
+  mv := mv'
+  for (old, _) in changed.reverse do
+    mv ← mv.tryClear old
+  -- 4. Fold the goal (definitional `change`).
+  if goalFolded != (← mv.getType) then
+    mv ← foldStep "change" <| mv.change goalFolded
+  -- 5/6. Hide the bodies of the used definitions; drop the unused ones.
+  -- NOTE: `clearValue` restructures the context (it reverts from the
+  -- definition and re-introduces everything after it), so fvarIds recorded
+  -- at step 2 go stale after the first call — re-resolve each definition by
+  -- its userName in the current context. A definition left with its value
+  -- would make lean-smt's preprocessing revert (`preserveOrder := true`)
+  -- fail on the let-decl (the recv 💥 of the first prototype build).
+  for f'Name in letNames do
+    let f'? ← mv.withContext do
+      pure (((← getLCtx).findFromUserName? f'Name).map (·.fvarId))
+    let some f' := f'? | continue
+    let used ← mv.withContext do
+      let inGoal := (← mv.getType).containsFVar f'
+      let inHyps := (← getLCtx).any fun d =>
+        !d.isImplementationDetail && d.type.containsFVar f'
+      pure (inGoal || inHyps)
+    if used then
+      mv ← foldStep "clearValue" <| mv.clearValue f'
+    else
+      mv ← foldStep "clearUnused" <| mv.tryClear f'
+  replaceMainGoal [mv]
+  -- 7. Prepay the instance re-synthesis over the *folded* conditions: the
+  -- pipeline's `classical_ite_cond_congr` rewrites
+  -- `ite c (Classical.propDecidable c)` to a synthesized instance (e.g.
+  -- `instDecidableAnd` for conjunction conditions), so replay the sets
+  -- hypothesis-locally once more. This must run AFTER `clearValue`: with
+  -- the definitions still transparent, synthesis unfolds them (`Decidable
+  -- f'` ⟶ `Decidable (f a⃗ = true)` ⟶ `instDecidableEqBool …`) and
+  -- re-introduces exactly the value-dependence the fold removed; with the
+  -- definitions opaque it can only produce value-independent instances.
+  let _ ← preSimpLeanSmtSets
+
 private def mkVeilSmtTactic : TacticM (TSyntax `tactic) := do
   let idents ← getPropsInContext
   let opts ← getOptions
@@ -917,9 +1110,18 @@ def elabVeilSolve : DesugarTacticM Unit := withBackwardsCompatibility <| veilWit
   veilEvalTactic tac
 
 def elabVeilSmt (stx : Syntax) (trace : Bool := false) : DesugarTacticM Unit := withBackwardsCompatibility <| veilWithMainContext do
+  -- Reconstruction mode: fold Bool atoms into opaque Prop predicates first,
+  -- so lean-smt's whole-telescope `embedding` pass has nothing to do (see
+  -- `__veil_fold_bool_atoms`). Runs before `mkVeilSmtTactic` so the hint
+  -- idents are collected from the folded context.
+  let opts ← getOptions
+  if !veil.smt.trust.get opts && veil.smt.foldBoolAtoms.get opts then
+    veilWithMainContext <| veilEvalTactic <| ← `(tactic| __veil_fold_bool_atoms)
+    -- The fold's hypothesis-local pre-simp can close trivial goals.
+    if (← getUnsolvedGoals).isEmpty then return
   -- It's necessary to `open Classical` to make proof reconstruction work.
   -- Otherwise, sometimes it fails due to failing to infer `Decidable` instances.
-  let auto_tac ← mkVeilSmtTactic
+  let auto_tac ← veilWithMainContext mkVeilSmtTactic
   if trace then
     addSuggestion stx auto_tac
   else
@@ -1540,6 +1742,7 @@ def elabVeilFail : TacticM Unit := veilWithMainContext do
   tactic __veil_concretize_fields_tr,
   tactic __veil_neutralize_decidable_inst,
   tactic __veil_ghost_relation_ssa,
+  tactic __veil_fold_bool_atoms,
   tactic __veil_solve_wplo,
   tactic __veil_solve_trlo,
   tactic __veil_solve_wp_conservative,
@@ -1590,6 +1793,8 @@ def elabVeilTactics : Tactic := fun stx => do
     withTraceNode `veil.perf.tactic (fun _ => return "__veil_neutralize_decidable_inst") (elabVeilNeutralizeDecidableInst (agg.isSome) loc)
   | `(tactic| __veil_ghost_relation_ssa $[at $hyp:ident]?) => do
     withTraceNode `veil.perf.tactic (fun _ => return "__veil_ghost_relation_ssa") (elabGhostRelationSSA hyp)
+  | `(tactic| __veil_fold_bool_atoms) => do
+    withTraceNode `veil.perf.tactic (fun _ => return "__veil_fold_bool_atoms") elabVeilFoldBoolAtoms
   -- User-facing tactics
   | `(tactic| veil_rename_hyp $[$xs:term => $ys:ident],*) => do
     withTraceNode `veil.perf.tactic (fun _ => return "veil_rename_hyp") $ elabVeilRenameHyp xs ys
