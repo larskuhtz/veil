@@ -39,6 +39,16 @@ register_simp_attr actSimp
 /-- Attribute added for simplifications done for symbolic model checking. -/
 register_simp_attr nextSimp
 
+/-- Exactly the pre-computed transitions of a module's actions: each
+`<action>.ext.tr` definition and its `<action>.ext.derived_eq` theorem
+(`(<action>.ext …).toTransitionDerived = <action>.ext.tr …`). After
+`cases` on the label and `simp only [<Module>.Next, <Module>.NextAct] at h`,
+`simp only [trSimp] at h` exposes the transition body — the guards and the
+`setIn {…} s₀ = s₁` equation — of every action, without unfolding the action
+bodies (`actSimp`/`nextSimp` do, which defeats the `derived_eq` rewrite). For
+two-state facts about generated actions. -/
+register_simp_attr trSimp
+
 /-- Attribute added to `DerivedDefinition`s that are `.actionLike`, to unfold them. -/
 register_simp_attr derivedActSimp
 

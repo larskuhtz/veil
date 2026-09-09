@@ -103,6 +103,12 @@ def instLawfulAbstractFieldRepresentation : Ident := mkIdent instLawfulAbstractF
 
 def instInhabitedStateFieldConcreteTypeName : Name := `instInhabitedStateFieldConcreteType
 def instInhabitedStateFieldConcreteType : Ident := mkIdent instInhabitedStateFieldConcreteTypeName
+/-- `Inhabited (State (FieldAbstractType …))` from the sorts' `Inhabited`
+instances alone (the concrete-representation instance above needs one
+`Inhabited (χ f)` per field, which instance synthesis does not find for the
+abstract representation). -/
+def instInhabitedStateFieldAbstractTypeName : Name := `instInhabitedStateFieldAbstractType
+def instInhabitedStateFieldAbstractType : Ident := mkIdent instInhabitedStateFieldAbstractTypeName
 
 def structureFieldLabelTypeName (base : Name) : Name := base ++ labelTypeName
 def structureFieldLabelType (base : Name) : Ident := mkIdent <| structureFieldLabelTypeName base

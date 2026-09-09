@@ -642,7 +642,8 @@ private def defineTransition (mod : Module) (nm : Name) (dk : DeclarationKind) :
         -- (3) Construct the expression
         -- The expression for `act.ext.tr`; **TODO** register as a derived definition
         let trExpr ← instantiateMVars $ ← Meta.mkLambdaFVars (vs ++ xs) resBody.expr
-        let attrs ← #[`actSimp, `nextSimp].mapM (fun attr => do elabAttr $ ← `(Parser.Term.attrInstance| $(Lean.mkIdent attr):ident))
+        -- `trSimp`: exactly the `tr` definitions and `derived_eq` theorems (two-state facts).
+        let attrs ← #[`actSimp, `nextSimp, `trSimp].mapM (fun attr => do elabAttr $ ← `(Parser.Term.attrInstance| $(Lean.mkIdent attr):ident))
         let trDef_fqn ← addVeilDefinition (toTransitionName nm) trExpr (attr := #[{name := `reducible}] ++ attrs)
         -- (4) Prove the equality theorem
         proveEqAboutBody body trDef_fqn (vs ++ xs) (← resBody.getProof) (toTransitionEqName nm) #[]
@@ -662,7 +663,7 @@ private def defineTransition (mod : Module) (nm : Name) (dk : DeclarationKind) :
           let heq2 ← Meta.mkAppOptM trEq_fqn (vs.map some)
           let res ← Meta.mkAppM ``derive_eq_template #[heq1, heq2]
           pure res
-        let attrs ← #[`actSimp, `nextSimp].mapM (fun attr => do elabAttr $ ← `(Parser.Term.attrInstance| $(Lean.mkIdent attr):ident))
+        let attrs ← #[`actSimp, `nextSimp, `trSimp].mapM (fun attr => do elabAttr $ ← `(Parser.Term.attrInstance| $(Lean.mkIdent attr):ident))
         proveEqAboutBody derivedExpr trDef_fqn vs proof (toDerivedEqName nm) attrs
           (extraFVars := extraFVars)
 
