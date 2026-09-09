@@ -272,7 +272,9 @@ def Module.assembleNextTransition (mod : Module) : CommandElabM (Command × Modu
   let binders ← (baseParams ++ extraParams).mapM (·.binder)
   let labelT ← mod.labelTypeStx
   let nextTrT ← `(term| $environmentTheory → $environmentState → $labelT → $environmentState → Prop)
-  let (rd, st, st', label) := (mkIdent `rd, mkIdent `st, mkIdent `st', mkIdent `label)
+  -- Implementation-detail names: an action parameter may be called `rd`, `st`,
+  -- `st'` or `label`; these binders must not capture it.
+  let (rd, st, st', label) := (mkVeilImplementationDetailIdent `rd, mkVeilImplementationDetailIdent `st, mkVeilImplementationDetailIdent `st', mkVeilImplementationDetailIdent `label)
   let (nextActParams, _) ← mod.declarationAllParams assembledNextActName (.derivedDefinition .actionLike actionNames)
   let nextActArgs ← nextActParams.mapM (·.arg)
   let body ← `(term| (@$assembledNextAct $nextActArgs* $label).toTransitionDerived $rd $st $st')
@@ -294,7 +296,9 @@ def Module.assembleNextTransition' (mod : Module) : CommandElabM Command := do
   let binders ← (baseParams ++ extraParams).mapM (·.binder)
   let labelT ← mod.labelTypeStx
   let nextTrT ← `(term| $environmentTheory → $environmentState → $labelT → $environmentState → Prop)
-  let (rd, st, st', label) := (mkIdent `rd, mkIdent `st, mkIdent `st', mkIdent `label)
+  -- Implementation-detail names: an action parameter may be called `rd`, `st`,
+  -- `st'` or `label`; these binders must not capture it.
+  let (rd, st, st', label) := (mkVeilImplementationDetailIdent `rd, mkVeilImplementationDetailIdent `st, mkVeilImplementationDetailIdent `st', mkVeilImplementationDetailIdent `label)
   let branches ← mod.actions.mapM fun s => do
     let name := Lean.mkIdent <| toTransitionName <| toExtName s.name
     let (params, actualParams) ← mod.declarationAllParams s.name s.declarationKind

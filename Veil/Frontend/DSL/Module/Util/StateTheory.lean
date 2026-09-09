@@ -213,6 +213,29 @@ where
   mkToJsonInstances : m (Array Syntax) := do
     pure #[← `(veil_deriving $(mkIdent ``Lean.ToJson) for $stateIdent with_priority low)]
 
+/-- `instance instInhabitedStateFieldAbstractType (sorts…) [Inhabited sort]… :
+Inhabited (State (FieldAbstractType sorts…)) := ⟨⟨default, …⟩⟩`: the abstract
+representation of every field is inhabited as soon as the sorts are (a
+relation is a `Bool`-valued function, a function's codomain and an
+individual's type are sorts), so this instance needs the sorts' `Inhabited`
+binders only. The concrete-representation instance
+(`instInhabitedStateFieldConcreteType`, one `[Inhabited (χ f)]` per field)
+is not found by synthesis for the abstract representation. `default` is the
+initializer's pre-state, so consumers of the generated transition system
+need this instance in scope. Elaborated best-effort by `#gen_state`: a
+module whose field types are not all inhabited from the sorts (e.g. a
+`param`-dependent codomain) simply has no such instance. -/
+def Module.abstractStateInhabitedInstanceStx [Monad m] [MonadQuotation m] [MonadExceptOf Exception m] [AddErrorMessageContext m] (mod : Module) : m Syntax := do
+  let paramBinders ← mod.uninterpretedParamBinders
+  let paramIdents ← mod.uninterpretedParamIdents
+  let sortIdents ← mod.parameters.filterMapM fun p => match p.kind with
+    | .sort _ => some <$> p.ident
+    | _ => pure none
+  let inhabBinders ← sortIdents.mapM fun s => `(bracketedBinder| [$(mkIdent ``Inhabited) $s])
+  let stateTy ← `(term| $(mkIdent stateName) ($fieldAbstractDispatcher $paramIdents*))
+  let defaults ← mod.mutableComponents.mapM fun _ => `(term| $(mkIdent ``default))
+  `(command| instance $instInhabitedStateFieldAbstractType:ident $paramBinders* $inhabBinders* : $(mkIdent ``Inhabited) $stateTy := ⟨⟨$[$defaults],*⟩⟩)
+
 /-- Generate a module-specific theorem exposing conditionals over abstract
 states as a field-wise structure literal.  Relation/function fields are
 eta-expanded so the condition is pushed to pointwise applications instead of

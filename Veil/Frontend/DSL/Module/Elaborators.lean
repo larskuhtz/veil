@@ -244,6 +244,13 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
     let instantiationStxs ← mod.mkInstantiationStructure
     for stx in stateStxs ++ theoryStxs ++ instantiationStxs do
       elabVeilCommand stx
+    -- `Inhabited (State (FieldAbstractType …))` from the sorts' `Inhabited`
+    -- binders alone (see `Module.abstractStateInhabitedInstanceStx`);
+    -- best-effort, since not every field type is inhabited from the sorts.
+    try
+      elabVeilCommand (← mod.abstractStateInhabitedInstanceStx)
+    catch ex =>
+      trace[veil.debug] "no `Inhabited` instance for the abstract state: {ex.toMessageData}"
     generateIgnoreFn mod
     let mod := { mod with _stateDefined := true }
     if mod._useLocalRPropTC && !(← isModelCheckCompileMode) then
@@ -899,7 +906,10 @@ def elabTransition : CommandElab := fun stx => do
       let unchangedFields := mutableFieldNames.filter (!changedFn ·)
       -- obtain the "real" transition term
       let trStx ← do
-        let (th, st, st') := (mkIdent `th, mkIdent `st, mkIdent `st')
+        -- Implementation-detail names: a `transition` parameter may be called
+        -- `th`, `st` or `st'` (the post-state is `st'` for the user only in the
+        -- primed-field notation, never as a binder).
+        let (th, st, st') := (mkVeilImplementationDetailIdent `th, mkVeilImplementationDetailIdent `st, mkVeilImplementationDetailIdent `st')
         let unchangedFields := unchangedFields.map Lean.mkIdent
         let tmp ← liftTermElabM <| mod.withTheoryAndStateTermTemplate [(.theory, th, true), (.state .none "conc", st, true), (.state "'" "conc'", st', true)]
           (some $ ← `(term|Prop))
@@ -944,6 +954,18 @@ def elabGhostDefinition : CommandElab := fun stx => do
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
 
+/-- An `assumption` is a background axiom over the theory — the immutable
+part of the state. A mutable component in it would only fail later, in the
+theory-only elaboration, as "Unbound uncapitalized variable: `<name>`", which
+does not say why; say it here, at the offending identifier. -/
+private def throwIfAssumptionMentionsMutable (mod : Module) (prop : Term) : CommandElabM Unit := do
+  let mutableNames := mod.mutableComponents.map (·.name)
+  if let some bad := prop.raw.find? fun s => s.isIdent && mutableNames.contains s.getId then
+    throwErrorAt bad "`{bad.getId}` is a mutable state component, but an `assumption` is a \
+      background axiom: it ranges over the immutable part of the state only (`immutable` \
+      components, sorts and instantiated classes). State a property of the mutable state \
+      as an `invariant` (checked) or a `trusted invariant` (assumed)."
+
 @[command_elab Veil.assertionDeclaration]
 def elabAssertion : CommandElab := fun stx => do
   let mut mod ← getCurrentModule (errMsg := "You cannot declare an assertion outside of a Veil module!")
@@ -951,7 +973,9 @@ def elabAssertion : CommandElab := fun stx => do
   mod.throwIfSpecAlreadyFinalized
   -- TODO: handle assertion sets correctly
   let assertion : StateAssertion ← match stx with
-  | `(command|assumption $name:propertyName ? $prop:term) => mod.mkAssertion .assumption name prop stx
+  | `(command|assumption $name:propertyName ? $prop:term) => do
+    throwIfAssumptionMentionsMutable mod prop
+    mod.mkAssertion .assumption name prop stx
   | `(command|invariant $name:propertyName ? $prop:term) => mod.mkAssertion .invariant name prop stx
   | `(command|safety $name:propertyName ? $prop:term) => mod.mkAssertion .safety name prop stx
   | `(command|trusted invariant $name:propertyName ? $prop:term) => mod.mkAssertion .trustedInvariant name prop stx
