@@ -492,6 +492,18 @@ private def checkModuleSolverHypotheses (stx : Syntax) (mod : Module) : CommandE
     analyzeInstantiatedClasses mod.name vs
   reportWithheldSolverHypotheses stx mod.name withheld
 
+/-- The cross-file counterpart of `checkModuleSolverHypotheses`: the
+instantiated classes are the instance-implicit binders of the persisted VC
+statements (all cells of a module share them, so one entry suffices). -/
+private def checkRegistrySolverHypotheses (stx : Syntax) (modName : Name)
+    (entries : Array VCRegistryEntry) : CommandElabM Unit := do
+  let some e := entries[0]? | return
+  let withheld ← liftTermElabM <| Meta.forallTelescope e.type fun vs _ => do
+    let insts ← vs.filterM fun v => do
+      return (← v.fvarId!.getBinderInfo) == .instImplicit
+    analyzeInstantiatedClasses modName insts
+  reportWithheldSolverHypotheses stx modName withheld
+
 private def runFilteredInvariantCheck
     (stx : Syntax)
     (mod : Module)
@@ -597,6 +609,8 @@ private def runRegistryFilteredCheck (stx : Syntax) (modName : Name)
     logWarningAt stx m!"⏭ skipped (veil.noVerify): no VCs were solved"
     return
   throwIfInsideDefiningModule modName
+  if let some entries ← getVCRegistry? modName then
+    checkRegistrySolverHypotheses stx modName entries
   armCrossFileVerifier
   generateVCsFromRegistry modName pred
   Verifier.runFilteredAsync filter (logVerificationResults stx)
@@ -674,6 +688,7 @@ def elabProveAction : CommandElab := fun stx => do
     let some allEntries ← getVCRegistry? modName
       | throwError "no VC registry for module `{modName}` in scope \
           (modules with a registry: {(← vcRegistryModules).toList})"
+    checkRegistrySolverHypotheses stx modName allEntries
     let preproven := allEntries.filter fun e =>
       e.action == actionName && e.kind == .primary && env.contains (ns.append e.name)
     for e in preproven do
