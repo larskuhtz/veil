@@ -139,7 +139,10 @@ respective fields, recursively.
 Use `only [Foo, Bar]` to only destruct structures with those names. -/
 syntax (name := veil_destruct) "veil_destruct" (colGt ident)* ("only" "[" ident,* "]")? ("without" "[" ident,* "]")? : tactic
 /-- A different implementation of `veil_destruct` that simply collects
-certain `structure`/`class` types to destruct and then pass them to `cases_type*`. -/
+certain `structure`/`class` types to destruct and then pass them to `cases_type*`,
+repeating until no structure type appears that has not been destructed yet
+(a class that `extends` a parent exposes the parent as a structure-typed
+projection field only after the first pass). -/
 syntax (name := veil_destruct') "veil_destruct'" : tactic
 /-- Destruct hypotheses whose type heads match the given identifiers.
 
@@ -492,7 +495,10 @@ where
 
 end
 
-def elabVeilDestruct' : DesugarTacticM Unit := veilWithMainContext do
+/-- The structure types `veil_destruct'` destructs in the current main
+context: the type heads of every structure-typed hypothesis, except the
+Veil-internal classes in `hypTypesToSkipDestruct` and `And`. -/
+private def veilDestructTargets : DesugarTacticM (Array Name) := veilWithMainContext do
   let mut targets := #[]
   for hyp in (← getLCtx) do
     if hyp.isImplementationDetail then continue
@@ -504,9 +510,32 @@ def elabVeilDestruct' : DesugarTacticM Unit := veilWithMainContext do
     -- Special check
     -- FIXME: This is too ad-hoc ...
     if nm == ``And then continue
-    targets := targets.push nm
-  let targetIdents := targets.map mkIdent
-  veilEvalTactic $ ← `(tactic| (try veil_cases_type* $[$targetIdents:ident]*) ; expose_names )
+    unless targets.contains nm do
+      targets := targets.push nm
+  return targets
+
+/-- Destruct every structure-typed hypothesis (see `veilDestructTargets`)
+with `cases_type*`, iterating until no structure type appears that has not
+been destructed yet. One pass is not enough: destructing an instance of a
+class that `extends` a parent yields the parent projection
+(`inst.toParent : Parent …`), itself structure-typed and absent from the
+types collected before the pass; left in place it survives as a
+structure-typed variable inside otherwise first-order hypotheses and the
+SMT translation aborts (`cannot translate Type`). The slow path
+(`veil_destruct`, `elabVeilDestructAllHyps`) already iterates. Every pass
+passes all currently present target types to `cases_type*`, so a field of
+an already-seen type is destructed too; the loop ends when a pass would
+add no type to the seen set, which bounds it by the number of structure
+types involved. -/
+def elabVeilDestruct' : DesugarTacticM Unit := veilWithMainContext do
+  let mut seen : Array Name := #[]
+  repeat
+    let targets ← veilDestructTargets
+    if targets.all seen.contains then break
+    seen := seen ++ targets
+    let targetIdents := targets.map mkIdent
+    veilEvalTactic $ ← `(tactic| try veil_cases_type* $[$targetIdents:ident]*)
+  veilEvalTactic $ ← `(tactic| expose_names)
 
 private inductive GenericStateKind
   | environmentState
