@@ -982,6 +982,12 @@ def elabGenTheorems : CommandElab := fun stx => do
     -- batch pass below covers the rest (stragglers, lazy-dropped witnesses).
     let _ ← Verifier.waitFilteredSync (fun _ => true) (persistIncrementally := true)
     Verifier.addProvenTheoremsInDependencyOrder (fun _ => true)
+    -- `#gen_composition`: with the cells persisted, emit the per-action
+    -- preservation lemmas (`init_case` / `step_<action>`) into this
+    -- namespace, exactly as `#prove_action` does per proof file — so a
+    -- module verified in-file composes like a file family. Best-effort;
+    -- one summary message.
+    emitPreservationLemmas stx mod.name
 
 open Lean Meta Elab Command Veil in
 /-- Developer tool. Import all module parameters into section scope. -/
