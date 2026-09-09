@@ -105,6 +105,25 @@ The `open` command makes the type class fields available without qualification.
 
 See `Std.lean` for the complete list of type classes.
 
+Every `Prop` field of an instantiated class is a hypothesis of every SMT
+query of the module (its data fields are uninterpreted symbols). The
+translation handles the first-order fragment only: a field that binds a
+function or a predicate (`∀ run : Nat → state, …`) or a type cannot be sent
+to the solver. The check commands (`#check_invariants`, `#check_action`,
+`#gen_theorems`, and the cross-file forms) detect this before any solver
+starts and report the class and field once. Such a field can be declared
+anyway and withheld from the solver:
+
+```lean
+attribute [veil_smt_ignore] MyContract.totality
+```
+
+The attribute goes on the projection function of a `Prop` field, after the
+class (Lean accepts no attributes on fields themselves). The field remains
+an axiom of the class for Lean-level consumers; the check commands list the
+withheld fields of a module in one info message, so what the solver assumes
+about an instantiated class is always "every axiom, except the listed ones".
+
 ### 4. State and Theory Components
 
 State components define the **signature** of your transition system.

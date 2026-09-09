@@ -3,6 +3,7 @@ import Lean.Meta.Tactic.TryThis
 import Veil.Base
 import Veil.Frontend.DSL.Module.Syntax
 import Veil.Frontend.DSL.Infra.EnvExtensions
+import Veil.Frontend.DSL.Infra.SolverHypotheses
 import Veil.Frontend.DSL.Module.Util
 import Veil.Frontend.DSL.Action.Elaborators
 import Veil.Frontend.DSL.State.SubState
@@ -403,11 +404,26 @@ def logVerificationResults (stx : Syntax) (results : VerificationResults VCMetad
       logWarningAt stx (trustedSmtWarning trustedCount)
     addUndischargedTheoremSuggestion stx results
 
+/-- Before any solver starts on the module's VCs: check every `Prop` field
+of its instantiated classes against the first-order fragment the SMT
+translation accepts — one error naming class and field, instead of an
+opaque solver failure on every cell — and report the fields withheld with
+`veil_smt_ignore`, once per module per file. The instances are the module's
+theory-level parameters (sorts, user parameters, instantiated classes),
+elaborated as binders. -/
+private def checkModuleSolverHypotheses (stx : Syntax) (mod : Module) : CommandElabM Unit := do
+  let params ← mod.declarationBaseParams (.stateAssertion .assumption)
+  let binders ← params.mapM (·.binder)
+  let withheld ← liftTermElabM <| Term.elabBinders binders fun vs =>
+    analyzeInstantiatedClasses mod.name vs
+  reportWithheldSolverHypotheses stx mod.name withheld
+
 private def runFilteredInvariantCheck
     (stx : Syntax)
     (mod : Module)
     (filter : VCMetadata → Bool)
     : CommandElabM Unit := do
+  checkModuleSolverHypotheses stx mod
   Verifier.runFilteredAsync filter (logVerificationResults stx)
   Verifier.displayStreamingResults stx
     (do
@@ -603,11 +619,13 @@ def elabGenSpec : CommandElab := fun stx => do
     localEnv.modifyModule (fun _ => mod)
 
 @[command_elab Veil.genTheorems]
-def elabGenTheorems : CommandElab := fun _stx => do
+def elabGenTheorems : CommandElab := fun stx => do
   withTraceNode `veil.perf.elaborator.genTheorems (fun _ => return "#gen_theorems") do
     if ← isModelCheckCompileMode then return
     let mod ← getCurrentModule (errMsg := "You cannot #gen_theorems outside of a Veil module!")
     mod.throwIfSpecNotFinalized
+    -- `#gen_theorems` may be the first command to start the dischargers.
+    checkModuleSolverHypotheses stx mod
     let _ ← Verifier.waitFilteredSync (fun _ => true)
     Verifier.addProvenTheoremsInDependencyOrder (fun _ => true)
 
