@@ -10,12 +10,13 @@ import Veil.Core.Tools.ModelChecker.TransitionSystem
 The Veil-side generator that replaces per-project composition scripts:
 given an imported module whose
 per-action VCs have been persisted as theorems (`#prove_action` in the
-per-action proof files), emit
+per-action proof files, or `#gen_theorems` inside the module), emit
 
 * per action, the **preservation lemma** `step_<action>` (and `init_case`
   for the initializer) — the assembly of one action's per-property cell
   theorems into a single Hoare-triple-shaped fact about the action's
-  derived transition (`emitPreservationLemma`, called by `#prove_action`);
+  derived transition (`emitPreservationLemma`, called by `#prove_action`;
+  `emitPreservationLemmas`, called by `#gen_theorems` for every action);
 * the **`invariants_of_reachable` induction** over the generated
   `RelationalTransitionSystem.reachable`, one case per action, each a
   one-line application of the action's preservation lemma; and
@@ -307,22 +308,34 @@ private def cellLeaf (ctx : LeafContext) (conj : Expr) : MetaM Expr := do
     throwError "cell theorem `{thmName}` does not state a \
       `meetsSpecificationIfSuccessfulAssuming` form:{indentExpr thmTy}"
 
-/-! ## The per-action preservation lemma (`#prove_action`'s exported output) -/
+/-! ## The per-action preservation lemma (the composition's input)
 
-/-- Emit `<ns>.step_<action>` (or `<ns>.init_case` for the initializer): the
-one lemma per proof file the composition consumes — the action preserves
+Emitted once per action by whichever command persisted the action's cells:
+`#prove_action` in a per-action proof file, or `#gen_theorems` inside the
+defining module (every action at once). Both land in the current namespace
+next to the cell theorems they consume, which is where `#gen_composition`
+looks first. -/
+
+/-- The name of the preservation lemma for `actionName` in namespace `ns`:
+`<ns>.init_case` for the initializer, `<ns>.step_<action>` otherwise. -/
+def preservationLemmaName (ns actionName : Name) : Name :=
+  ns ++ (if actionName == `initializer then `init_case else Name.mkSimple s!"step_{actionName}")
+
+/-- Emit the preservation lemma of one action at an already-extracted
+canonical instantiation `c` (see `withCanonicalRTS`): the action preserves
 (the initializer establishes) the assembled `Invariants` conjunction, with
-every conjunct discharged by the action's persisted cell theorem through
-the bridge lemmas. Idempotent. Called by `#prove_action` after persistence. -/
-def emitPreservationLemma (stx : Syntax) (modName actionName : Name) :
-    CommandElabM Unit := do
-  let ns ← getCurrNamespace
+every conjunct discharged by the action's persisted cell theorem
+(`<ns>.<action>_<property>`, or its `_tr` form) through the bridge lemmas.
+Idempotent: returns `(fresh, lemmaName)`, `fresh := false` when an
+identically-stated lemma already existed. Throws if a cell theorem is
+missing — the caller decides whether that is fatal. -/
+def emitPreservationLemmaCore (c : CanonicalRTS) (ns modName actionName : Name) :
+    MetaM (Bool × Name) := do
   let isInit := actionName == `initializer
-  let lemmaName := ns ++ (if isInit then `init_case else Name.mkSimple s!"step_{actionName}")
-  let t0 ← IO.monoMsNow
-  let fresh ← liftTermElabM <| withCanonicalRTS modName fun c => do
-    let assuTy := fun th => mkAppN (mkConst ``RelationalTransitionSystem.assumptions)
-      #[c.ρ, c.σ, c.lbl, c.rtsApp, th]
+  let lemmaName := preservationLemmaName ns actionName
+  let assuTy := fun th => mkAppN (mkConst ``RelationalTransitionSystem.assumptions)
+    #[c.ρ, c.σ, c.lbl, c.rtsApp, th]
+  let fresh ←
     if isInit then
       let extName := toExtName (modName ++ `initializer)
       withLocalDeclD `th c.ρ fun th => do
@@ -380,15 +393,80 @@ def emitPreservationLemma (stx : Syntax) (modName actionName : Name) :
         let stmt := remapLeadingToImplicit
           (← mkForallFVars fvars (mkApp2 c.invApp th s2)) c.binders.size
         addTheoremIdempotent lemmaName stmt (← mkLambdaFVars fvars body)
+  return (fresh, lemmaName)
+
+/-- Emit `<ns>.step_<action>` (or `<ns>.init_case` for the initializer): the
+one lemma per proof file the composition consumes. Idempotent. Called by
+`#prove_action` after persistence; a missing cell theorem is an error here,
+because `#prove_action` has just persisted (or consumed) every cell. -/
+def emitPreservationLemma (stx : Syntax) (modName actionName : Name) :
+    CommandElabM Unit := do
+  let ns ← getCurrNamespace
+  let t0 ← IO.monoMsNow
+  let (fresh, lemmaName) ← liftTermElabM <| withCanonicalRTS modName fun c =>
+    emitPreservationLemmaCore c ns modName actionName
   let dt := (← IO.monoMsNow) - t0
   if fresh then
     logInfoAt stx m!"emitted preservation lemma `{lemmaName}` ({dt} ms)"
   else
     logInfoAt stx m!"preservation lemma `{lemmaName}` already exists (statement verified, {dt} ms)"
 
+/-- Emit the preservation lemmas of every action of `modName` — `init_case`
+and one `step_<action>` per `Label` constructor — into the current
+namespace. Called by `#gen_theorems` after it has persisted the module's
+cells, so `#gen_composition <Module>` works on an in-file `#gen_theorems`
+module exactly as on a `#prove_action` file family.
+
+Best-effort, per action: a lemma that cannot be built — a cell whose VC
+was not proven and so was never persisted, or a `transition`-syntax action
+(no `derived_eq`, see `cellLeaf`) — is skipped and named, with its reason,
+in the single summary message; `#gen_theorems` itself never fails because
+of this step, and nothing it persisted is affected. -/
+def emitPreservationLemmas (stx : Syntax) (modName : Name) : CommandElabM Unit := do
+  let ns ← getCurrNamespace
+  let t0 ← IO.monoMsNow
+  let outcome : Except MessageData (Array Name × Array Name × Array (Name × MessageData)) ←
+    try
+      liftTermElabM <| withCanonicalRTS modName fun c => do
+        let indInfo ← getConstInfoInduct (modName ++ labelTypeName)
+        let actions := #[`initializer] ++ indInfo.ctors.toArray.map fun ctor =>
+          ctor.replacePrefix (modName ++ labelTypeName) Name.anonymous
+        let mut emitted : Array Name := #[]
+        let mut existing : Array Name := #[]
+        let mut skipped : Array (Name × MessageData) := #[]
+        for act in actions do
+          try
+            let (fresh, lemmaName) ← emitPreservationLemmaCore c ns modName act
+            if fresh then emitted := emitted.push lemmaName
+            else existing := existing.push lemmaName
+          catch e =>
+            skipped := skipped.push (act, e.toMessageData)
+        return .ok (emitted, existing, skipped)
+    catch e => pure (.error e.toMessageData)
+  let dt := (← IO.monoMsNow) - t0
+  let list := fun (xs : Array Name) =>
+    MessageData.joinSep (xs.toList.map fun n => m!"`{n}`") ", "
+  match outcome with
+  | .error e =>
+    logInfoAt stx m!"#gen_theorems: no preservation lemmas emitted for \
+      `#gen_composition` ({dt} ms):{indentD e}"
+  | .ok (emitted, existing, skipped) =>
+    let mut msg := m!"#gen_theorems: emitted {emitted.size} preservation \
+      lemma(s) for `#gen_composition` ({dt} ms)"
+    unless emitted.isEmpty do
+      msg := msg ++ m!": {list emitted}"
+    unless existing.isEmpty do
+      msg := msg ++ m!"; {existing.size} already present (statement verified): \
+        {list existing}"
+    unless skipped.isEmpty do
+      msg := msg ++ m!"; not emitted for {skipped.size} action(s):"
+      for (act, why) in skipped do
+        msg := msg ++ indentD m!"`{act}`: {why}"
+    logInfoAt stx msg
+
 /-! ## `#gen_composition` -/
 
-/-- Resolve a lemma `#prove_action` emitted (`step_<action>` / `init_case`),
+/-- Resolve an emitted preservation lemma (`step_<action>` / `init_case`),
 looking through the layouts the file family uses. -/
 private def resolveEmittedLemma (ns modName : Name) (base : Name) : MetaM Name := do
   let candidates := #[ns ++ base, ns ++ `Proofs ++ base, modName ++ `Proofs ++ base]
@@ -396,7 +474,9 @@ private def resolveEmittedLemma (ns modName : Name) (base : Name) : MetaM Name :
     if (← getEnv).contains c then return c
   throwError "cannot find `{base}` for module `{modName}` (tried \
     {candidates.toList}) — it is emitted by `#prove_action {modName} …` in \
-    the action's proof file; import that file (and check the namespace)."
+    the action's proof file, or by `#gen_theorems` inside the module (whose \
+    summary message names any action it could not emit a lemma for); import \
+    that file (and check the namespace)."
 
 /-- The `#gen_composition <Module>` payload: emit
 `<ns>.invariants_of_reachable` (the `reachable` induction over the

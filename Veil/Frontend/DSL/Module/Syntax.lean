@@ -301,6 +301,12 @@ scoped syntax (name := assertionDeclaration) propertyKind (propertyName)? term :
 /-- Assemble the specification. -/
 scoped syntax (name := genSpec) kw_gen_spec : command
 
+/-- `#gen_theorems`: persist the module's proven verification conditions as
+theorems in the current namespace (one `<action>_<property>` theorem per
+cell), then emit the per-action preservation lemmas `init_case` /
+`step_<action>` that `#gen_composition` composes into
+`invariants_of_reachable`. The lemma emission is best-effort and reported in
+one info message; the persisted theorems do not depend on it. -/
 scoped syntax (name := genTheorems) kw_gen_theorems : command
 
 scoped syntax (name := checkInvariants) "#check_invariants" : command
@@ -349,7 +355,9 @@ scoped syntax (name := proveVC) "#prove_vc" ident ident ident (" by " tacticSeq)
 /-- `#gen_composition <Module>`: emit, into the current namespace, the
 composition of the module's per-action preservation lemmas (the
 `step_<action>`/`init_case` lemmas `#prove_action` emits in the per-action
-proof files, which must be imported): `invariants_of_reachable` — every
+proof files, which must be imported — or `#gen_theorems` emits inside the
+module, in which case run this in the module's namespace):
+`invariants_of_reachable` — every
 reachable state of the generated `relationalTransitionSystem` satisfies
 the assembled `Invariants` conjunction — plus one named
 `reachable_<property>` projection per invariant, in declaration order.
