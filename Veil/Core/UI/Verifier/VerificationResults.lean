@@ -343,8 +343,103 @@ private def formatFailureDiagnostics (status : Option VCStatus)
       (collectDiagnostics dischargerUnknownReasons vc allVCs)
   | some .proven | some .disproven | none => none
 
+private def formatMs (ms : Nat) : String :=
+  s!"{ms / 1000}.{ms % 1000 / 100} s"
+
+/-- If this cell (primary VC or an active alternative) was proven by a retry
+attempt, the attempt index. Retried successes are reported distinctly (see
+`veil.smt.retries`) so seed-flakiness stays visible instead of being hidden
+by the retry. -/
+private def provenOnRetry? (vc : VCResult VCMetadata SmtResult)
+    (allVCs : Array (VCResult VCMetadata SmtResult)) : Option Nat := Id.run do
+  for relatedVC in activeRelatedVCs vc allVCs do
+    if let some successId := relatedVC.timing.successfulDischargerId then
+      if let some d := relatedVC.timing.dischargers.find? (·.id == successId) then
+        if d.attempt > 0 then
+          return some d.attempt
+  return none
+
+private def retryNote (vc : VCResult VCMetadata SmtResult)
+    (allVCs : Array (VCResult VCMetadata SmtResult)) : String :=
+  match provenOnRetry? vc allVCs with
+  | some k => s!" (retry {k}, seed {k})"
+  | none => ""
+
+/-- The slowest discharge attempts across all non-dormant induction VCs
+(`veil.report.slowVCs` entries, 0 disables). Failed attempts are included:
+they burn the full timeout and are exactly the tail that dominates sweep wall
+time. Only attempts taking at least `veil.report.slowVCsMinMs` are reported
+(none qualifying ⇒ no report), keeping the output deterministic for fast
+specifications. Attempts above `veil.report.nearTimeoutPercent` of
+`veil.smt.timeout` are flagged as near-timeout (the flag compares against
+the timeout option as set at reporting time). -/
+private def formatSlowVCsReport [Monad m] [MonadOptions m]
+    (results : VerificationResults VCMetadata SmtResult) : m (Option MessageData) := do
+  let opts ← getOptions
+  let topN := veil.report.slowVCs.get opts
+  if topN == 0 then return none
+  let minMs := veil.report.slowVCsMinMs.get opts
+  let timeoutMs := veil.smt.timeout.get opts * 1000
+  let nearTimeoutMs := timeoutMs * veil.report.nearTimeoutPercent.get opts / 100
+  let mut attempts : Array (Name × Nat) := #[]
+  for vc in results.vcs do
+    unless vc.metadata.isInduction && !vc.isDormant do continue
+    for d in vc.timing.dischargers do
+      if let .finished res := d.status then
+        if res.time ≥ minMs then
+          attempts := attempts.push (d.name, res.time)
+  if attempts.isEmpty then return none
+  let slowest := attempts.qsort (fun a b => a.2 > b.2) |>.take topN
+  let mut msg := m!"Slowest discharge attempts \
+    (≥ {formatMs minMs}; top {slowest.size} of {attempts.size}):\n"
+  for (name, time) in slowest do
+    let flag := if timeoutMs > 0 && time ≥ nearTimeoutMs then
+      s!" ⚠️ near timeout ({time * 100 / timeoutMs}% of {formatMs timeoutMs})"
+    else ""
+    msg := msg ++ m!"  {formatMs time}  {name}{flag}\n"
+  return some msg
+
+/-- Format the witness-size report (`veil.report.witnessSizes`): aggregate
+statistics plus the largest witnesses, from the sizes the dischargers
+recorded in `Verifier.witnessSizeRegistry`. Entries are deduplicated by
+discharger name (later measurements win). Off by default. -/
+private def formatWitnessSizesReport [Monad m] [MonadOptions m] [MonadLiftT BaseIO m] :
+    m (Option MessageData) := do
+  unless veil.report.witnessSizes.get (← getOptions) do return none
+  let entries ← (witnessSizeRegistry.get : BaseIO _)
+  if entries.isEmpty then return none
+  let deduped := entries.foldl (init := (∅ : Std.HashMap Name WitnessSizeEntry))
+    fun acc e => acc.insert e.discharger e
+  let entries := deduped.valuesArray
+  let total := entries.foldl (init := 0) (· + ·.numObjs)
+  let sorted := entries.qsort (fun a b => a.numObjs > b.numObjs)
+  let topN := sorted.take 10
+  let mut msg := m!"Witness sizes (heap objects, DAG-aware; \
+    {entries.size} witnesses, total {total}, mean {total / entries.size}, \
+    top {topN.size}):\n"
+  for e in topN do
+    let flag := if e.trusted then " (trusted leaf)" else " (reconstructed)"
+    msg := msg ++ m!"  {e.numObjs}  {e.discharger}{flag}\n"
+  return some msg
+
+/-- Note how many proof witnesses are currently retained in memory for
+streaming `#gen_theorems` persistence (`veil.gen.streamTheorems`) — and, in
+particular, that a module which never runs `#gen_theorems` should not set the
+option (retention would never be released). Shown only when the option is
+enabled. -/
+private def formatRetainedWitnessesNote [Monad m] [MonadOptions m] [MonadLiftT BaseIO m] :
+    m (Option MessageData) := do
+  unless veil.gen.streamTheorems.get (← getOptions) do return none
+  let count ← (vcManager.atomically fun ref => return (← ref.get).retainedWitnessCount : BaseIO _)
+  if count == 0 then return none
+  return some m!"{count} proof witnesses retained in memory for `#gen_theorems` \
+    (`veil.gen.streamTheorems`); it releases each one as it is persisted. If \
+    this module does not run `#gen_theorems`, unset the option — retained \
+    witnesses are never freed otherwise.\n"
+
 /-- Format verification results as text output for logging. -/
-def formatVerificationResults [Monad m] [MonadOptions m](results : VerificationResults VCMetadata SmtResult) : m MessageData := do
+def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
+    (results : VerificationResults VCMetadata SmtResult) : m MessageData := do
   let includeCounterexamples := veil.printCounterexamples.get (← getOptions)
   let vcs := results.vcs.filter fun vc =>
     vc.metadata.isInduction && !vc.isDormant && vc.alternativeFor.isNone
@@ -361,7 +456,7 @@ def formatVerificationResults [Monad m] [MonadOptions m](results : VerificationR
     for vc in initVCs do
       let .induction m := vc.metadata | continue
       let status := effectiveStatus vc results.vcs
-      msg := msg ++ m!"  {m.property} ... {statusEmoji status}\n"
+      msg := msg ++ m!"  {m.property} ... {statusEmoji status}{retryNote vc results.vcs}\n"
       if includeCounterexamples && status == some .disproven then
         if let some ceMsg := formatCounterexamples vc results.vcs then
           msg := msg ++ ceMsg
@@ -374,12 +469,18 @@ def formatVerificationResults [Monad m] [MonadOptions m](results : VerificationR
       for vc in vcs do
         let .induction m := vc.metadata | continue
         let status := effectiveStatus vc results.vcs
-        msg := msg ++ m!"    {m.property} ... {statusEmoji status}\n"
+        msg := msg ++ m!"    {m.property} ... {statusEmoji status}{retryNote vc results.vcs}\n"
         if includeCounterexamples && status == some .disproven then
           if let some ceMsg := formatCounterexamples vc results.vcs then
             msg := msg ++ ceMsg
         if let some diagnosticMsg := formatFailureDiagnostics status vc results.vcs then
           msg := msg ++ diagnosticMsg
+  if let some slowMsg ← formatSlowVCsReport results then
+    msg := msg ++ slowMsg
+  if let some sizeMsg ← formatWitnessSizesReport then
+    msg := msg ++ sizeMsg
+  if let some retainedMsg ← formatRetainedWitnessesNote then
+    msg := msg ++ retainedMsg
   return msg
 
 /-- Check if any VCs have non-proven status. -/

@@ -45,11 +45,19 @@ structure VCStatement where
   convenience in generating `theorem` statements, we keep the binders
   separately, in the `params` field. -/
   statement : Term
+  /-- Pre-elaborated statement type. When present, `VCStatement.type` returns
+  it directly instead of elaborating `params`/`statement`. Used by the
+  cross-file check commands, whose statements come from the persisted VC
+  registry (`veil.gen.vcRegistry`) as `Expr`s — elaborating against the
+  persisted `Expr` guarantees the checked statement is identical to what the
+  defining module generated, independent of the consumer file's scopes. -/
+  typeExpr? : Option Expr := none
 deriving Inhabited, BEq
 
 open Elab Term in
 /-- The type of the VC's statement as an `Expr`. -/
 def VCStatement.type (vc : VCStatement) : TermElabM Expr := do
+  if let some t := vc.typeExpr? then return t
   Term.elabBinders vc.params fun vs => do
   let body ← withSynthesize (postpone := .no) $
     withoutErrToSorry $ elabTerm vc.statement (Expr.sort Level.zero)
@@ -96,6 +104,19 @@ def DischargerResult.kindString (res : DischargerResult ResultT) : String :=
   | .unknown _ _ => "unknown"
   | .error _ _ => "error"
 
+/-- Whether this result represents a solver timeout. Timeouts surface as
+exceptions whose message carries the solver's TIMEOUT marker; this is the same
+classification `exhaustedVCStatus` uses to report `VCStatus.timeout` (⏱), and
+`nextDischarger?` uses it to decide whether retry attempts should fire. -/
+def DischargerResult.isTimeout (res : DischargerResult ResultT) : Bool :=
+  match res with
+  | .error exs _ =>
+    exs.any fun (_, json) =>
+      match json with
+      | .str s => unknownExplanation? s == some .timeout
+      | _ => false
+  | _ => false
+
 instance [ToString ResultT] : ToString (DischargerResult ResultT) where
   toString res :=
     match res with
@@ -134,6 +155,11 @@ structure Discharger (ResultT : Type) where
   /-- Whether this discharger comes from an explicitly tagged interactive proof
   theorem rather than automatic tooling. -/
   isInteractive : Bool := false
+  /-- Attempt index for automatic retry (`veil.smt.retries`). 0 is the primary
+  attempt; attempts > 0 are seed-perturbed retries, which `nextDischarger?`
+  only schedules after an earlier attempt of the same VC *timed out* (they are
+  skipped after `sat`, genuine `unknown`, or non-timeout errors). -/
+  attempt : Nat := 0
   /-- Optionally, a VC discharger can provide term (e.g. a proof script) that
   can be shown to the user, e.g. when a VC's corresponding `theorem` is
   pretty-printed. -/
@@ -158,6 +184,17 @@ structure Discharger (ResultT : Type) where
   action causes the task to be started eagerly. The task should be stored in
   the `task` field for later access. -/
   private mkTask : BaseIO SnapshotTreeTask
+
+  /-- Closure that re-elaborates the proof witness on demand, populated for
+  successfully proven VCs whose witness was dropped from `_dischargerResults`
+  for lazy regeneration (`veil.lazyWitnessRegen`).
+
+  The closure captures `env0` (the elaboration env at discharge time), the
+  proof script `term`, and the `VCStatement` — together enough to repeat the
+  original elaboration. `#gen_theorems` invokes this closure to rebuild the
+  witness; until then the per-VC heap footprint stays at ~O(closure) instead
+  of the ~10 MB of unique witness `Expr` nodes per VC. -/
+  regenWitness? : Option (Lean.Elab.Command.CommandElabM Witness) := none
 
 structure VCData (VCMetaT : Type) extends VCStatement where
   /-- Metadata associated with this VC, provided by the frontend. -/
@@ -230,8 +267,13 @@ so it cannot throw or be interrupted: dischargers must call this on every
 path (success, handled failure, non-elaborating fallback). -/
 def publishDischargerResult (resultPromise : IO.Promise (DischargerResult ResultT))
     (ch : Std.Channel (ManagerNotification VCMetaT ResultT))
-    (id : DischargerIdentifier) (res : DischargerResult ResultT) : BaseIO Unit := do
-  resultPromise.resolve res
+    (id : DischargerIdentifier) (res : DischargerResult ResultT)
+    (promiseRes? : Option (DischargerResult ResultT) := none) : BaseIO Unit := do
+  -- The promise may carry a *different* (witness-stripped) result from the one
+  -- sent to the manager: a resolved promise pins its value for the lifetime of
+  -- the discharger node, so retaining a witness here would defeat the
+  -- manager-side release (see `veil.gen.streamTheorems`).
+  resultPromise.resolve (promiseRes?.getD res)
   let _ ← ch.send (.dischargerResult id res)
 
 inductive VCStatus where
@@ -437,6 +479,67 @@ def VCManager.provenWitness? (mgr : VCManager VCMetaT ResultT)
   | some (.proven (some witness) _ _) => some (vc, witness)
   | _ => none
 
+/-- Lazy variant of `provenWitness?`: returns the VC together with either the
+stored witness (if any) or the discharger's `regenWitness?` closure. Used by
+`#gen_theorems` to materialize theorems on demand when the discharger dropped
+its witness for steady-state heap relief (`veil.lazyWitnessRegen`). -/
+def VCManager.provenWitnessOrRegen? (mgr : VCManager VCMetaT ResultT)
+    (vcId : VCId) : Option (VerificationCondition VCMetaT ResultT ×
+      (Option Witness × Option (Lean.Elab.Command.CommandElabM Witness))) := do
+  let vc ← mgr.nodes[vcId]?
+  let dischargerId ← vc.successful
+  let discharger ← vc.dischargers[dischargerId]?
+  match mgr._dischargerResults[(vcId, dischargerId)]? with
+  | some (.proven witness? _ _) => some (vc, (witness?, discharger.regenWitness?))
+  | _ => none
+
+/-- The final status recorded for `vcId`, if it has reached one
+(`_doneWith`). `none` means the VC is still running or waiting. -/
+def VCManager.vcFinalStatus? (mgr : VCManager VCMetaT ResultT)
+    (vcId : VCId) : Option VCStatus :=
+  mgr._doneWith[vcId]?
+
+/-- Number of discharger results recorded so far — a cheap progress signal for
+pollers that only need to know whether anything changed since their last look
+(`persistProvenIncrementally`'s short-circuit). -/
+def VCManager.recordedResultCount (mgr : VCManager VCMetaT ResultT) : Nat :=
+  mgr._dischargerResults.size
+
+/-- Number of result slots currently holding a retained sorry-free proof
+witness — streaming-persistence retention (`veil.gen.streamTheorems`) not yet
+released by `#gen_theorems`'s incremental persist pass (plus any interactive
+`@[veil]` theorem proofs, which are always stored in full). Used by the
+results display to surface how much witness mass is being held. -/
+def VCManager.retainedWitnessCount (mgr : VCManager VCMetaT ResultT) : Nat :=
+  mgr._dischargerResults.fold (init := 0) fun n _ res =>
+    match res with
+    | .proven (some w) _ _ => if w.hasSorry then n else n + 1
+    | _ => n
+
+/-- Release the stored witness of `vcId`'s successful discharger and drop its
+regeneration closure. Called by the incremental persist pass
+(`veil.gen.streamTheorems`) right after the VC's theorem has been added to the
+environment: the (large, reconstruction-mode) witness `Expr` and the closure
+have no further consumers. The result slot keeps its `ResultT` payload and
+timing; the witness is replaced by the same sentinel value lazy regen stores
+(a 1-node `sorryAx` for trusted witnesses — preserving the `hasSorry` signal
+that drives the trusted-SMT warning — and `none` for sorry-free ones). -/
+def VCManager.releasePersistedWitness (mgr : VCManager VCMetaT ResultT)
+    (vcId : VCId) : VCManager VCMetaT ResultT := Id.run do
+  let some vc := mgr.nodes[vcId]? | return mgr
+  let some dischargerId := vc.successful | return mgr
+  let mut mgr := mgr
+  if let some (.proven witness? data t) := mgr._dischargerResults[(vcId, dischargerId)]? then
+    let sentinel? : Option Witness :=
+      if witness?.any (·.hasSorry) then some (Lean.mkConst ``sorryAx) else none
+    mgr := { mgr with _dischargerResults :=
+      mgr._dischargerResults.insert (vcId, dischargerId) (.proven sentinel? data t) }
+  if let some discharger := vc.dischargers[dischargerId]? then
+    let discharger' := { discharger with regenWitness? := none }
+    let vc' := { vc with dischargers := vc.dischargers.set! dischargerId discharger' }
+    mgr := { mgr with nodes := mgr.nodes.insert vcId vc' }
+  return mgr
+
 def Discharger.run (discharger : Discharger ResultT) : BaseIO (Discharger ResultT) := do
   match discharger.task with
   | some _ => return discharger
@@ -492,22 +595,35 @@ def Discharger.startTime (discharger : Discharger ResultT) : BaseIO (Option Nat)
     return none
 
 /-- Find the next discharger to try. Once this function returns `none`, it will
-not return `some` again unless new dischargers are added. -/
+not return `some` again unless new dischargers are added.
+
+Retry attempts (`Discharger.attempt > 0`) are only scheduled when an earlier
+attempt of this VC timed out; after `sat`, genuine `unknown`, or non-timeout
+errors they are skipped permanently (they stay `notStarted`, contributing
+nothing to the VC's aggregate status). -/
 def VerificationCondition.nextDischarger? (vc : VerificationCondition VCMetaT ResultT) : BaseIO (Option (Discharger ResultT)) := do
   match vc.successful with
   | some _ => return .none
   | none =>
     if vc.hasInteractiveDischarger then
       return none
+    let mut sawTimeout := false
     for discharger in vc.dischargers do
       match ← discharger.status with
-      | .notStarted => return some discharger
+      | .notStarted =>
+        if discharger.attempt > 0 && !sawTimeout then
+          continue
+        return some discharger
       -- if the discharger is still running, wait for it to finish
       | .running => return none
       -- if the discharger is finished the VC is proven or disproven, we're done
       | .finished (.proven _ _ _)  | .finished (.disproven _ _) => return none
-      | .finished (.unknown _ _) => continue
-      | .finished (.error _ _) => continue
+      | .finished res@(.unknown _ _) =>
+        sawTimeout := sawTimeout || res.isTimeout
+        continue
+      | .finished res@(.error _ _) =>
+        sawTimeout := sawTimeout || res.isTimeout
+        continue
     return none
 
 /-- Enable every VC currently in the manager (dormant ones included: they
@@ -561,15 +677,6 @@ def VCManager.cancelAllDischargers (mgr : VCManager VCMetaT ResultT) : BaseIO Un
     for discharger in vc.dischargers do
       discharger.cancelTk.set
 
-private def dischargerErrorIsTimeout (res : DischargerResult ResultT) : Bool :=
-  match res with
-  | .error exs _ =>
-    exs.any fun (_, json) =>
-      match json with
-      | .str s => unknownExplanation? s == some .timeout
-      | _ => false
-  | _ => false
-
 /-- Compute the final status for a VC whose dischargers have been exhausted.
 Concrete outcomes take priority, and among failures a non-timeout `error`
 outranks `unknown`; we only report `timeout` when every recorded error was a
@@ -589,7 +696,7 @@ private def VCManager.exhaustedVCStatus (mgr : VCManager VCMetaT ResultT)
           | .disproven _ _ => (true, hasUnknown, hasError, allErrorsAreTimeout)
           | .unknown _ _ => (hasDisproven, true, hasError, allErrorsAreTimeout)
           | .error _ _ =>
-            (hasDisproven, hasUnknown, true, allErrorsAreTimeout && dischargerErrorIsTimeout result)
+            (hasDisproven, hasUnknown, true, allErrorsAreTimeout && result.isTimeout)
           | .proven _ _ _ => (hasDisproven, hasUnknown, hasError, allErrorsAreTimeout)
     if hasDisproven then
       .disproven

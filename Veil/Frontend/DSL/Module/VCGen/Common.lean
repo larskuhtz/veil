@@ -97,7 +97,9 @@ def Discharger.fromTermWith (term : Term) (vcStatement : VCStatement)
     (ch : Std.Channel (ManagerNotification VCMetadata SmtResult))
     (mkResult : Std.CloseableChannel ((Name × Nat) × Smt.AsyncOutput) →
       Witness ⊕ Exception → Nat → TermElabM (DischargerResult SmtResult))
-    (traceLabel : String := "discharger") : CommandElabM (Discharger SmtResult) := do
+    (traceLabel : String := "discharger")
+    (promiseResult : DischargerResult SmtResult → DischargerResult SmtResult := fun r => r)
+    : CommandElabM (Discharger SmtResult) := do
   let cancelTk ← IO.CancelToken.new
   let smtCh ← Std.CloseableChannel.new
   -- Create promises to track start time and result
@@ -128,7 +130,7 @@ def Discharger.fromTermWith (term : Term) (vcStatement : VCStatement)
           return .error #[← safeExceptionEntry ex, ← safeExceptionEntry ex2]
             (endTime - startTime)
     )
-    publishDischargerResult resultPromise ch dischargerId res
+    publishDischargerResult resultPromise ch dischargerId res (some (promiseResult res))
   ) cancelTk
   -- Dedicated thread: the task blocks in in-process solver FFI for its whole
   -- duration, which would starve the bounded elaboration thread pool
