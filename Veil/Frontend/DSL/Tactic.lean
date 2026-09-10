@@ -256,6 +256,13 @@ syntax (name := veil_solve_tr) "veil_solve_tr" : tactic
 
 syntax (name := __veil_solve_trlo) "__veil_solve_trlo" : tactic
 syntax (name := __veil_solve_tr_conservative) "__veil_solve_tr_conservative" : tactic
+/-- Discharge a `step_property` cell (`Transition.meetsStepSpecificationAssuming`:
+a two-state postcondition over the action's pre-computed transition). The
+local-TR bridge (`veil_apply_local_tr`) matches the one-state specification
+form only, so this goes straight to the transition route: introduce the
+points and the hypotheses, expose the transition body, split conditionals,
+concretize both states, and solve. -/
+syntax (name := veil_solve_step) "veil_solve_step" : tactic
 
 /-- Solve bounded model checking (trace) goals. This includes:
 1. Introducing hypotheses with `veil_intros`
@@ -1329,6 +1336,10 @@ def elabVeilSolveTrConservative : DesugarTacticM Unit := veilWithMainContext do
   let tac ← `(tactic| veil_simp +$(mkIdent `instances) only [$(mkIdent `invSimp):ident, $(mkIdent `actSimp):ident] at *; veil_simp +$(mkIdent `instances) only [$(mkIdent `ifSimp):ident] at *; veil_destruct only [$(mkIdent ``Exists), $(mkIdent ``And)]; veil_split_ifs ; all_goals (veil_concretize_tr; veil_fol ; veil_solve))
   veilEvalTactic tac
 
+@[inherit_doc veil_solve_step]
+def elabVeilSolveStep : DesugarTacticM Unit := veilWithMainContext do
+  veilEvalTactic <| ← `(tactic| (veil_intros; __veil_solve_tr_conservative))
+
 /-- Try the local-TR path first; if applying the local bridge theorem fails,
 fall back to the old transition solver.
 
@@ -1546,6 +1557,7 @@ def elabVeilFail : TacticM Unit := veilWithMainContext do
   tactic veil_solve_wp,
   tactic veil_solve_wp_doesnotthrow,
   tactic veil_solve_tr,
+  tactic veil_solve_step,
   tactic veil_bmc,
   tactic veil_split_ifs,
   tactic veil_unveil,
@@ -1633,6 +1645,8 @@ def elabVeilTactics : Tactic := fun stx => do
     withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_wp_doesnotthrow") (withProofCache elabVeilSolveWpDoesNotThrow)
   | `(tactic| veil_solve_tr) => do
     withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_tr") (withProofCache elabVeilSolveTr)
+  | `(tactic| veil_solve_step) => do
+    withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_step") (withProofCache elabVeilSolveStep)
   | `(tactic| veil_bmc) => do
     withTraceNode `veil.perf.tactic (fun _ => return "veil_bmc") elabVeilBmc
   | `(tactic| veil_split_ifs) => do

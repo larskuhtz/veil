@@ -49,6 +49,7 @@ where
       | .trustedInvariant => s!"trusted_inv_{sz}"
       | .termination => s!"termination_{sz}"
       | .stateConstraint => s!"state_constraint_{sz}"
+      | .stepProperty => s!"step_{sz}"
 
 def Module.registerAssertion [Monad m] [MonadError m] (mod : Module) (sc : StateAssertion) : m Module := do
   mod.throwIfAlreadyDeclared sc.name
@@ -242,6 +243,23 @@ def withTheoryAndState (t : Term) (motiveType : Option Term) (fieldRepInstance :
   let binders := #[← `(bracketedBinder| ($th : $environmentTheory := by veil_exact_theory)), ← `(bracketedBinder| ($st : $environmentState := by veil_exact_state))]
   return (binders, ← `(term|$fn $th $st))
 
+/-- The two-state form of `withTheoryAndState`, for `step_property`
+bodies: `fun th st st' => Pred`, with the pre-state components exposed under
+their own names and the post-state components under their primed names —
+the binding a `transition` body gets. No `by veil_exact_*` defaults: a step
+property is never applied inside an action body. -/
+def withTheoryAndTwoStates (t : Term) (motiveType : Option Term) (fieldRepInstance : Term := fieldRepresentation) : MetaM (Array (TSyntax `Lean.Parser.Term.bracketedBinder) × Term) := do
+  let mut mod ← getCurrentModule
+  let (th, st, st') := (mkIdent `th, mkIdent `st, mkIdent `st')
+  let fn ← do
+    let tmp ← mod.withTheoryAndStateTermTemplate
+      [(.theory, th, true), (.state .none "_conc", st, true), (.state "'" "_conc'", st', true)]
+      motiveType (fun _ _ => pure t) (fieldRepInstance := fieldRepInstance)
+    `(term| (fun ($th : $environmentTheory) ($st $st' : $environmentState) => $tmp))
+  let binders := #[← `(bracketedBinder| ($th : $environmentTheory)),
+    ← `(bracketedBinder| ($st : $environmentState)), ← `(bracketedBinder| ($st' : $environmentState))]
+  return (binders, ← `(term|$fn $th $st $st'))
+
 /-- Variant of `withTheoryAndState` that uses specific types for theory and
 state rather than the environment theory `ρ` and environment state `σ`. We use
 this to elaborate assertions in `sat trace` commands. -/
@@ -283,7 +301,8 @@ capitalized variables are universally quantified via `uqc%` (only valid for
 `Prop`-returning terms). The `motiveType` parameter controls the motive used
 in the `casesOn` eliminators. -/
 def Module.mkVeilTerm (mod : Module) (name : Name) (dk : DeclarationKind) (params : Option (TSyntax `Lean.explicitBinders)) (term : Term)
-  (motiveType : Option Term) (justTheory : Bool := false) (quantifyCapitals : Bool := false) : TermElabM ElaboratedVeilTerm := do
+  (motiveType : Option Term) (justTheory : Bool := false) (quantifyCapitals : Bool := false)
+  (twoStates : Bool := false) : TermElabM ElaboratedVeilTerm := do
   let baseParams ← mod.declarationBaseParams dk
   let binders ← baseParams.mapM (·.binder)
   let paramBinders ← Option.stxArrMapM params toBracketedBinderArray
@@ -292,7 +311,10 @@ def Module.mkVeilTerm (mod : Module) (name : Name) (dk : DeclarationKind) (param
   -- quantification as deeply inside the term as possible, rather than above
   -- the binders for `rd` and `st` introduced below.
   let body ← if quantifyCapitals then `(uqc% ($term:term)) else pure term
-  let (thstBinders, term') ← if justTheory then withTheory body motiveType else withTheoryAndState body motiveType
+  let (thstBinders, term') ←
+    if justTheory then withTheory body motiveType
+    else if twoStates then withTheoryAndTwoStates body motiveType
+    else withTheoryAndState body motiveType
   let term' := Syntax.inheritSourceSpanFrom term' term
   -- Record the `Decidable` instances that are needed for the assertion.
   let allBinders := binders ++ paramBinders ++ thstBinders

@@ -247,6 +247,15 @@ def Transition.meetsSpecificationIfSuccessfulAssuming (act : Transition ρ σ) (
 def Transition.preservesInvariantsIfSuccessfulAssuming (act : Transition ρ σ) (assu : ρ → Prop) (inv : SProp ρ σ) : Prop :=
   Transition.meetsSpecificationIfSuccessfulAssuming act assu inv inv
 
+/-- A two-state (step) property of a transition: from every pre-state
+satisfying the assumptions and `pre`, every step of `act` reaches a
+post-state related to the pre-state by `post`. The verification condition of
+a `step_property` cell. -/
+@[reducible]
+def Transition.meetsStepSpecificationAssuming (act : Transition ρ σ) (assu : ρ → Prop) (pre : SProp ρ σ)
+    (post : ρ → σ → σ → Prop) : Prop :=
+  ∀ r₀ s₀ s₁, (assu r₀ ∧ pre r₀ s₀) → act r₀ s₀ s₁ → post r₀ s₀ s₁
+
 
 end TransitionSemantics
 

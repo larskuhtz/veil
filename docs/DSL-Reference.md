@@ -458,3 +458,29 @@ the transition hypothesis is the only explicit argument, so a consumer writes
 computed writes, values chosen by `pick`, actions written in `transition`
 syntax (which also block the whole-system `<f>.mono`). Emission is silent;
 `set_option trace.veil.stepLemmas true` prints the per-component verdicts.
+
+#### Step Properties
+
+A `step_property` is a two-state property: a proposition over a pre-state and
+a post-state, with the primed-component notation of `transition` bodies (`f`
+is the pre-state component, `f'` the post-state one; capitalised variables
+are universally quantified, as in `invariant`; only mutable components have a
+primed form):
+
+```lean
+step_property [pending_mono] { pending N M → pending' N M }
+step_property [committed_frozen] { committed N → entry' N V = entry N V }
+```
+
+It is checked once per action, under the module's assumptions and its
+invariants at the pre-state — an action property, strictly more than an
+invariant (which speaks about the post-state alone) and strictly less than
+general safety: a property relating non-adjacent states needs history state.
+Step properties are conclusions only; no cell assumes another step property.
+The cells appear in `#check_invariants` (under their action), in the
+persistent VC registry and `#veil_status`, and `#gen_theorems` persists them
+as `<action>_<property>`. `#gen_theorems` and `#gen_composition` also emit
+`<property>_step` — the property over every label, from the assumptions and
+the invariants at the pre-state — and `#gen_composition` emits
+`reachable_<property>_step`, the property along every step from a reachable
+state. These are what a downstream contract consumes.

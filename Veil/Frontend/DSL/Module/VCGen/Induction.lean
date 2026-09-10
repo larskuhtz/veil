@@ -218,7 +218,7 @@ private def mkVCForSpecTheorem [Monad m] [MonadMacroAdapter m] [MonadExceptOf Ex
   -- NOTE: the VCs are stated in terms of `act.ext` (for WP) or `act.ext.tr` (for TR)
   let actionIdent := match style with
     | .wp => toExtName actName
-    | .tr => toTransitionName (toExtName actName)
+    | .tr | .step => toTransitionName (toExtName actName)
   let ((_, allModArgs), (actBinders, actArgs)) ← mod.declarationSplitBindersArgs actName actKind
   let (_, assArgs) ← mod.declarationAllBindersArgs assembledAssumptionsName
     (.derivedDefinition .assumptionLike dependsOn)
@@ -302,6 +302,24 @@ private def mkMeetsSpecificationIfSuccessfulClauseTrVC [Monad m] [MonadMacroAdap
     ``Transition.meetsSpecificationIfSuccessfulAssuming
     (Name.mkSimple s!"{actName}_{invariantClause}_tr") vcKind
     (style := .tr) (extraDeps := extraDeps)
+    (extraTerms := extraTerms)
+
+/-- The `step_property` cell of an action: a TR-style VC whose postcondition
+relates the pre- and post-state (`Transition.meetsStepSpecificationAssuming`),
+under the assumptions and the invariants at the pre-state. Named
+`<action>_<property>`, style `.step`. -/
+private def mkStepPropertyVC [Monad m] [MonadMacroAdapter m] [MonadExceptOf Exception m] [AddErrorMessageContext m] [MonadEnv m] [MonadRecDepth m] [MonadResolveName m]
+    [MonadTrace m] [MonadOptions m] [AddMessageContext m] [MonadLiftT IO m]
+    (mod : Module) (actName : Name) (actKind : DeclarationKind) (stepProperty : Name)
+    (vcKind : InductionVCKind) : m (VCData VCMetadata) := do
+  let extraDeps : Std.HashSet Name := {stepProperty}
+  let extraTerms := #[← `(term|
+    (@$(mkIdent stepProperty)
+      $(← mod.declarationAllArgs stepProperty (.stateAssertion .stepProperty))*) )]
+  mkVCForSpecTheorem mod actName (propertyName := stepProperty) actKind
+    ``Transition.meetsStepSpecificationAssuming
+    (Name.mkSimple s!"{actName}_{stepProperty}") vcKind
+    (style := .step) (extraDeps := extraDeps)
     (extraTerms := extraTerms)
 
 /-! ## Module VC Generation -/
@@ -406,10 +424,34 @@ def Module.generateInvariantVCs (mod : Module) : CommandElabM Unit := do
           mgr.addRetryDischargers trVCId act.name "_TR" trRetries
       ref.set mgr
 
+/-- Generate the `step_property` cells: one primary VC per action ×
+step property (no initializer cell — `Init` has no meaningful pre-state; no
+WP alternative — the two-state postcondition has no WP form), discharged by
+`veil_solve_step` with the usual retry ladder. -/
+def Module.generateStepPropertyVCs (mod : Module) : CommandElabM Unit := do
+  let steps := mod.stepProperties
+  if steps.isEmpty then return
+  let actions := mod.procedures.filter fun s => s.info matches .action _ _
+  let stepSolve ← `(tactic| veil_solve_step)
+  let stepTactic ← `(by $stepSolve:tactic)
+  let stepRetries ← mkRetryTerms stepSolve
+  let vcData ← actions.foldlM (init := #[]) fun acc act => do
+    steps.foldlM (init := acc) fun acc' p => do
+      let vc ← mkStepPropertyVC mod act.name act.declarationKind p.name InductionVCKind.primary
+      return acc'.push (act, vc)
+  Verifier.withVCManager fun ref => do
+    for (act, vc) in vcData do
+      let mgr ← ref.get
+      let (mgr, vcId) := mgr.addVC vc {} #[]
+      let mgr ← mgr.mkAddDischarger vcId (VCDischarger.fromTerm stepTactic act.name (nameSuffix := "_STEP"))
+      let mgr ← mgr.addRetryDischargers vcId act.name "_STEP" stepRetries
+      ref.set mgr
+
 /-- Generate all VCs (both doesNotThrow and invariant preservation). -/
 def Module.generateVCs (mod : Module) : CommandElabM Unit := do
   mod.generateDoesNotThrowVCs
   mod.generateInvariantVCs
+  mod.generateStepPropertyVCs
 
 /-! ## Persistent VC registry (`veil.gen.vcRegistry`) -/
 
@@ -510,9 +552,10 @@ def VCRegistryEntry.dischargeTactic (e : VCRegistryEntry) :
   else match e.style with
     | .wp => `(tactic| veil_solve_wp)
     | .tr => `(tactic| veil_solve_tr)
+    | .step => `(tactic| veil_solve_step)
 
 private def VCRegistryEntry.nameSuffix (e : VCRegistryEntry) : String :=
-  match e.style with | .wp => "_WP" | .tr => "_TR"
+  match e.style with | .wp => "_WP" | .tr => "_TR" | .step => "_STEP"
 
 /-- Re-create a module's VCs in this file's VC manager from the persisted
 registry (`veil.gen.vcRegistry`), restricted to entries matching `pred`,

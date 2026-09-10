@@ -141,6 +141,12 @@ inductive StateAssertionKind
   /-- A `state_constraint` filters out states during model checking.
   States that do not satisfy the constraint are not explored. -/
   | stateConstraint
+  /-- A `step_property` is a two-state property: a proposition over a
+  pre-state and a post-state (post-state components primed, as in
+  `transition` bodies), checked once per action under the module's
+  assumptions and invariants at the pre-state. A conclusion only: it is
+  never a hypothesis of another verification condition. -/
+  | stepProperty
 deriving BEq, Hashable, Repr
 
 instance : Inhabited StateAssertionKind where

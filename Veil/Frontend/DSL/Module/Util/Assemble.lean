@@ -27,13 +27,14 @@ private def cleanupVeilDefinitionExpr (e : Expr) : TermElabM Expr := do
 def Module.defineAssertion (mod : Module) (base : StateAssertion) : CommandElabM Module := do
   mod.throwIfAlreadyDeclared base.name
   let justTheory := match base.kind with | .assumption => true | _ => false
+  let twoStates := base.kind matches .stepProperty
   -- NOTE(SUBTLE): we do something counter-intuitive here. Making the `ρ` and `σ`
   -- arguments implicit ensures that whenever the default values for `thstBinders`
   -- are evaluated (i.e. not provided explicitly), the assertion is forced to be
   -- evaluated with `ρ := Theory` and `σ := State`. This makes it possible to do
   -- things like `assert invariant` in action without having to provide any
   -- explicit arguments.
-  let veilTerm ← liftTermElabM $ mod.mkVeilTerm base.name base.declarationKind (params := .none) base.term (some $ ← `(term| Prop)) (justTheory := justTheory) (quantifyCapitals := true)
+  let veilTerm ← liftTermElabM $ mod.mkVeilTerm base.name base.declarationKind (params := .none) base.term (some $ ← `(term| Prop)) (justTheory := justTheory) (quantifyCapitals := true) (twoStates := twoStates)
   let (mod, extraParams) ← liftTermElabM $ mod.canonicalizeExtraParams veilTerm.extraParams
   let mut mod ← mod.registerAssertion { base with extraParams := extraParams }
   let attrs : Array Attribute := #[{name := `invSimp}, {name := `nextSimp}] ++ veilAbbrevAttrs

@@ -478,7 +478,12 @@ def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
       if let some diagnosticMsg := formatFailureDiagnostics status vc results.vcs then
         msg := msg ++ diagnosticMsg
   unless actionGroups.isEmpty do
-    msg := msg ++ m!"The following set of actions must preserve the invariant and successfully terminate:\n"
+    -- `step_property` cells sit under their action next to the invariant cells.
+    let hasStep := vcs.any fun vc => match vc.metadata with
+      | .induction m => m.style == .step | _ => false
+    msg := msg ++ (if hasStep
+      then m!"The following set of actions must preserve the invariant, satisfy the step properties, and successfully terminate:\n"
+      else m!"The following set of actions must preserve the invariant and successfully terminate:\n")
     for (actionName, vcs) in actionGroups.toArray do
       msg := msg ++ m!"  {actionName}\n"
       for vc in vcs do
