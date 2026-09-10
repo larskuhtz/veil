@@ -447,7 +447,14 @@ partial def elabVeilDestructSpecificHyp (ids : Array (TSyntax `ident)) (onlyStru
       continue
     let .some _sinfo := getStructureInfo? (← getEnv) sn | throwError "veil_destruct: {id} ({sn} is not a structure)"
     let newFieldNames := _sinfo.fieldNames.map (mkIdent $ Name.append name ·)
-    let s ← `(rcasesPat| ⟨ $[$newFieldNames],* ⟩)
+    -- `fieldNames` lists every constructor field, parents included. For a
+    -- class with an `extends` parent that parent field is instance-implicit,
+    -- and a plain `⟨…⟩` pattern distributes its names over the *explicit*
+    -- fields only — every name shifted by one, the last field handed a
+    -- nested tuple ("… is not an inductive datatype"). The explicit pattern
+    -- `@⟨…⟩` binds all fields; the parent instance then gets destructured
+    -- by the recursive pass like any other structure-typed hypothesis.
+    let s ← `(rcasesPat| @⟨ $[$newFieldNames],* ⟩)
     veilEvalTactic $ ← `(tactic| unhygienic rcases $(mkIdent ld.userName):ident with $s)
     -- Simplify FieldAbstractType in new field hypotheses
     -- This handles types like `FieldAbstractType node State.Label.leader`
