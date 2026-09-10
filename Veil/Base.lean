@@ -26,10 +26,12 @@ initialize
   registerTraceClass `veil.info
   registerTraceClass `veil.warning
   registerTraceClass `veil.debug
+  registerTraceClass `veil.cache
   registerTraceClass `veil.desugar
   registerTraceClass `veil.wp
   registerTraceClass `veil.timing
   registerTraceClass `veil.extraction
+  registerTraceClass `veil.stepLemmas
   -- Performance trace classes (integrate with Lean's profiler)
   registerTraceClass `veil.perf (inherited := true)
   registerTraceClass `veil.perf.elaborator
@@ -49,12 +51,15 @@ def veilDefaultOptions : List (Name × DataValue) := [
   (`maxRecDepth, DataValue.ofNat 1024),
   -- Needed because the model checker produces the code for the transition
   -- system (partly) via typeclass inference.
-  -- 500000 → 1000000: `#gen_state` on a ~50-component module sits at the
-  -- 500000 boundary; a file-level
-  -- `set_option maxHeartbeats` did not reach the failing `isDefEq`
-  -- (elaboration inside the module machinery), so the module default is the
-  -- effective knob.
-  (`maxHeartbeats, DataValue.ofNat 1000000),
+  -- Back to 500000: an earlier 1000000
+  -- raise was for `#gen_state` on a ~50-component module sitting at the
+  -- boundary — but this module default applies to the WHOLE module
+  -- elaboration (every discharger captures it at `#gen_spec`), and a global
+  -- heartbeat doubling is the prime suspect for a measured sweep-wall
+  -- regression. The `#gen_state` raise now lives scoped in the elaborator
+  -- (`Module.ensureStateIsDefined`), the one site that needs it; a
+  -- file-level `set_option` does not reach that site.
+  (`maxHeartbeats, DataValue.ofNat 500000),
   (`synthInstance.maxSize, DataValue.ofNat 4096),
 ]
 
@@ -84,6 +89,21 @@ register_option veil.violationIsError : Bool := {
   defValue := true
   descr := "If true, violations found by verification or model checking are \
   logged as errors. If false, they are logged as info messages."
+}
+
+register_option veil.gen.stepLemmas : Bool := {
+  defValue := true
+  descr := "When true (default), `#gen_spec` derives and kernel-checks, for every \
+  imperative action and every mutable state component `f`, either the frame lemma \
+  `<action>.frame_<f>` (the action leaves `f` unchanged) or the monotonicity lemma \
+  `<action>.mono_<f>` (the action only ever sets the `Bool`-valued `f` to `true`), \
+  plus the whole-system `<f>.mono` (over every label) when every action has one of \
+  the two, and `<f>.init` when the initializer sets `f` to a closed literal. Each \
+  lemma is derived from the action's pre-computed transition `<action>.ext.tr`; \
+  nothing is assumed, and a field whose updates are not of that shape simply gets \
+  no lemma. Emission is silent; `set_option trace.veil.stepLemmas true` shows the \
+  per-field verdicts, and a proof failure after a positive verdict is a warning. \
+  Set to false to skip the derivation."
 }
 
 register_option veil.__modelCheckCompileMode : Bool := {
@@ -320,6 +340,72 @@ register_option veil.gen.streamTheorems : Bool := {
   peak memory grows by the total witness mass). Inert under \
   `veil.smt.trust = true`: trusted witnesses are persisted as statement-only \
   stubs and are never retained in full."
+}
+
+register_option veil.cache.proofs : Bool := {
+  defValue := false
+  descr := "If true, the Veil discharge tactics (`veil_solve_wp`, \
+  `veil_solve_tr`, `veil_solve_wp_doesnotthrow`) consult a content-addressed \
+  on-disk proof cache (`veil.cache.dir`) before searching, and store every \
+  successful sorry-free proof term after. Reconstruction mode only \
+  (`veil.smt.trust false`): trusted-mode discharges are never cached. The \
+  cache key is the closed goal statement itself (the stored entry carries \
+  the full statement `Expr`; a hash collision is a miss, never a wrong \
+  answer), so it is solver- and option-independent — a cached proof either \
+  re-checks against the live goal and environment (`Meta.check` + `isDefEq` \
+  on every hit; the kernel still checks at every persistence point) or it \
+  is treated as a miss and re-solved. Failures, timeouts, and \
+  counterexamples are never cached (they must stay retryable / \
+  re-findable). Read at tactic runtime: for in-file sweeps set it before \
+  `#gen_spec` (discharger option capture); in cross-file consumers a \
+  file-level `set_option` works as written. Per-hit detail on \
+  `trace.veil.cache`; sweep output reports one ♻ summary line."
+}
+
+register_option veil.cache.dir : String := {
+  defValue := ".lake/build/veilcache"
+  descr := "Directory of the on-disk proof cache (`veil.cache.proofs`), \
+  relative to the process working directory (the workspace root under \
+  `lake build` and in the language server). One file per cached proof, \
+  named by the statement hash; safe to delete at any time (the cache only \
+  ever skips proof *search*, never checking)."
+}
+
+register_option veil.cache.maxAgeDays : Nat := {
+  defValue := 14
+  descr := "Age cutoff (days) for proof-cache entries (`veil.cache.proofs`; \
+  At the first successful store of a process, \
+  entries whose file modification time is older than this are deleted \
+  (plus day-old `.tmp` strays). Store-time only, once per process: a \
+  fully-warm build (no stores) never pays the directory scan. Hits do NOT \
+  refresh an entry's mtime, so an entry that only ever hits re-solves once \
+  per cutoff period and re-enters fresh — the price of not touching files \
+  on the hit path. 0 disables GC entirely."
+}
+
+register_option veil.cache.kernelReplay : Bool := {
+  defValue := true
+  descr := "If true (default — measured 3.3x cheaper than \
+  the elaborator re-check at large-witness scale, and stronger), \
+  proof-cache hits (`veil.cache.proofs`) are checked by \
+  the KERNEL instead of the elaborator. \
+  Persistence commands (`#prove_vc` and `#prove_action` cells) consult \
+  the cache at the command level and hand the cached \
+  term straight to `addDecl` — the kernel type-check IS the hit re-check — \
+  skipping tactic entry and the elaborator's `Meta.check`+`isDefEq`. \
+  Check-only discharges (sweep dischargers) kernel-check the cached term \
+  against a discarded scratch environment, which is *stronger* checking \
+  than a fresh sweep ✅ (elaborator-checked). A kernel rejection degrades \
+  to a miss and a fresh solve, so a stale or corrupt entry can never fail \
+  a build. No mode ever skips the check on a hit — this option only \
+  selects WHICH checker runs, and \
+  where. Like `veil.cache.proofs`, read at tactic/command runtime on the \
+  cross-file paths (a file-level `set_option` works as written \
+  there); for in-file sweeps set it before `#gen_spec`. Note: a \
+  command-level replay hit never elaborates the command's `by <tac>` \
+  suffix, so the unreachable-/unused-tactic linters flag it — set \
+  `linter.unreachableTactic`/`linter.unusedTactic` to false in files that \
+  expect hits."
 }
 
 register_option veil.gen.trustedTheoremStubs : Bool := {
