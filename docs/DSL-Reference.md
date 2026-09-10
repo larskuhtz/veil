@@ -433,3 +433,28 @@ unsat trace {
 ```
 
 Note that checking time grows exponentially with the trace length.
+
+#### Generated Step Lemmas
+
+`#gen_spec` also derives, from every imperative action's pre-computed
+transition `<action>.ext.tr`, a family of kernel-checked two-state lemmas
+about single state components (option `veil.gen.stepLemmas`, default on;
+nothing is assumed, and a component whose updates are not of the recognised
+shape simply gets no lemma):
+
+| Lemma | Statement | When |
+|---|---|---|
+| `<action>.frame_<f>` | `(RTS).tr th s (.<action> args) s' → s'.f = s.f` | every branch of the action leaves `f` unchanged |
+| `<action>.frame` | `(RTS).tr th s (.<action> args) s' → s'.f₁ = s.f₁ ∧ … ∧ s'.fₖ = s.fₖ` | the conjunction over all framed components (the per-field lemmas project it) |
+| `<action>.mono_<f>` | `(RTS).tr th s (.<action> args) s' → ∀ x…, s.f x… = true → s'.f x… = true` | every branch leaves the `Bool`-valued `f` unchanged or sets it to `true` |
+| `<f>.mono` | `(RTS).tr th s l s' → ∀ x…, s.f x… = true → s'.f x… = true` | every action has one of the two above, at least one `mono` |
+| `<f>.init` | `(RTS).init th s → ∀ x…, s.f x… = v` | the initializer sets `f` everywhere to the literal `v` |
+| `<action>.tr_of_step` | `(RTS).tr th s (.<action> args) s' → ⟨the body of <action>.ext.tr at th s s'⟩` | always (imperative actions); the exposed transition body every lemma above starts from |
+
+Here `RTS` is the module's `relationalTransitionSystem`, and the lemmas are
+stated at the instantiation it fixes (`Theory`, `State (FieldAbstractType …)`);
+the transition hypothesis is the only explicit argument, so a consumer writes
+`M.send.frame_leader h` or `M.pending.mono h x y hx`. Not derived: `false` or
+computed writes, values chosen by `pick`, actions written in `transition`
+syntax (which also block the whole-system `<f>.mono`). Emission is silent;
+`set_option trace.veil.stepLemmas true` prints the per-component verdicts.

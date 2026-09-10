@@ -30,6 +30,7 @@ initialize
   registerTraceClass `veil.wp
   registerTraceClass `veil.timing
   registerTraceClass `veil.extraction
+  registerTraceClass `veil.stepLemmas
   -- Performance trace classes (integrate with Lean's profiler)
   registerTraceClass `veil.perf (inherited := true)
   registerTraceClass `veil.perf.elaborator
@@ -79,6 +80,21 @@ register_option veil.violationIsError : Bool := {
   defValue := true
   descr := "If true, violations found by verification or model checking are \
   logged as errors. If false, they are logged as info messages."
+}
+
+register_option veil.gen.stepLemmas : Bool := {
+  defValue := true
+  descr := "When true (default), `#gen_spec` derives and kernel-checks, for every \
+  imperative action and every mutable state component `f`, either the frame lemma \
+  `<action>.frame_<f>` (the action leaves `f` unchanged) or the monotonicity lemma \
+  `<action>.mono_<f>` (the action only ever sets the `Bool`-valued `f` to `true`), \
+  plus the whole-system `<f>.mono` (over every label) when every action has one of \
+  the two, and `<f>.init` when the initializer sets `f` to a closed literal. Each \
+  lemma is derived from the action's pre-computed transition `<action>.ext.tr`; \
+  nothing is assumed, and a field whose updates are not of that shape simply gets \
+  no lemma. Emission is silent; `set_option trace.veil.stepLemmas true` shows the \
+  per-field verdicts, and a proof failure after a positive verdict is a warning. \
+  Set to false to skip the derivation."
 }
 
 register_option veil.__modelCheckCompileMode : Bool := {
