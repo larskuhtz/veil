@@ -176,6 +176,18 @@ def fieldMonoLemmaName (field : Name) : Name := field ++ `mono
 /-- `<f>.init`: in every initial state, `f` is a fixed closed literal. -/
 def fieldInitLemmaName (field : Name) : Name := field ++ `init
 
+/-! Step properties (`step_property`): the whole-system exports emitted by
+`#gen_theorems` / `#gen_composition` into the current namespace. -/
+
+/-- `<property>_step`: the step property over every label, from the
+assumptions and the invariants at the pre-state. -/
+def stepPropertyLemmaName (ns property : Name) : Name :=
+  ns ++ Name.mkSimple s!"{property}_step"
+/-- `reachable_<property>_step`: the step property along every step from a
+reachable state. -/
+def reachableStepLemmaName (ns property : Name) : Name :=
+  ns ++ Name.mkSimple s!"reachable_{property}_step"
+
 def transitionWeakeningLemmaName : Name := `_transitionWeakeningLemma
 def transitionWeakeningLemma : Ident := mkIdent transitionWeakeningLemmaName
 

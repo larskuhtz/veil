@@ -266,6 +266,15 @@ theorem Transition.triple_of_meets {tr : Transition ρ σ} {assu : ρ → Prop}
     ∀ r s s', assu r → pre r s → tr r s s' → post r s' :=
   fun r s s' ha hp htr => h r s s' ⟨ha, hp⟩ htr
 
+/-- The step-property counterpart of `Transition.triple_of_meets`: a
+`Transition.meetsStepSpecificationAssuming` statement (a `step_property`
+cell) in the shape the whole-system `<property>_step` lemma consumes. -/
+theorem Transition.step_of_meets {tr : Transition ρ σ} {assu : ρ → Prop}
+    {pre : SProp ρ σ} {post : ρ → σ → σ → Prop}
+    (h : tr.meetsStepSpecificationAssuming assu pre post) :
+    ∀ r s s', assu r → pre r s → tr r s s' → post r s s' :=
+  fun r s s' ha hp htr => h r s s' ⟨ha, hp⟩ htr
+
 end TransitionSemanticsTheorems
 
 section VCTheorems

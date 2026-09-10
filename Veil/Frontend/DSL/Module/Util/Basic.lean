@@ -94,6 +94,7 @@ instance : ToString StateAssertionKind where
     | StateAssertionKind.safety => "safety"
     | StateAssertionKind.termination => "termination"
     | StateAssertionKind.stateConstraint => "state_constraint"
+    | StateAssertionKind.stepProperty => "step_property"
 
 instance : ToString StateAssertion where
   toString sa := s!"{sa.kind} [{sa.name}] {sa.term}"
@@ -338,6 +339,7 @@ def Module.declarationBaseParams [Monad m] [MonadQuotation m] [MonadExceptOf Exc
   | .stateAssertion .assumption => pure (theoryParameters mod)
   | .stateAssertion .invariant | .stateAssertion .safety | .stateAssertion .trustedInvariant => pure mod.parameters
   | .stateAssertion .termination | .stateAssertion .stateConstraint => pure mod.parameters -- the same as `invariant`
+  | .stateAssertion .stepProperty => pure mod.parameters
   | .procedure _ => pure mod.parameters
   | .derivedDefinition k _ => derivedDefinitionBaseParams mod k
 where
@@ -469,6 +471,11 @@ def Module.checkableInvariants (mod : Module) : Array StateAssertion :=
 
 def Module.trustedInvariants (mod : Module) : Array StateAssertion :=
   mod.assertions.filter (fun a => a.kind == .trustedInvariant)
+
+/-- All `step_property` declarations (two-state properties; not part of
+`Invariants`). -/
+def Module.stepProperties (mod : Module) : Array StateAssertion :=
+  mod.assertions.filter (fun a => a.kind == .stepProperty)
 
 def Module.safeties (mod : Module) : Array StateAssertion :=
   mod.assertions.filter (fun a => a.kind == .safety)

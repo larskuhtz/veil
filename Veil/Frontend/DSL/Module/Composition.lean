@@ -82,6 +82,10 @@ structure CanonicalRTS where
   /-- The `default` pre-state the initializer transitions from (extracted
   from the RTS `init` field — carries the baked `Inhabited` instance). -/
   defaultState : Expr
+  /-- Binder name ↦ canonical value, from `NextAct`'s telescope: how every
+  generated definition sharing the module's parameter machinery is
+  instantiated at the canonical spine (`Invariants`, a `step_property`). -/
+  byName : Std.HashMap Name Expr
 
 /-- Reduce `e` by beta/iota/proj (`whnfCore`) and single-step head unfolding
 until its head is the constant `target`. Deterministic (never unfolds past
@@ -177,7 +181,7 @@ def withCanonicalRTS (modName : Name) (k : CanonicalRTS → MetaM θ) : MetaM θ
           points — unsupported `init` shape:{indentExpr body}"
       pure (args.extract 0 (args.size - 3), dflt)
     k { modName, binders := bs, rtsApp, ρ, σ, lbl, mode, α,
-        nextActSpine, invApp, initSpine, defaultState }
+        nextActSpine, invApp, initSpine, defaultState, byName }
 
 /-! ## Conjunct walking (the `Invariants` body is the declaration-order authority) -/
 
@@ -464,6 +468,142 @@ def emitPreservationLemmas (stx : Syntax) (modName : Name) : CommandElabM Unit :
         msg := msg ++ indentD m!"`{act}`: {why}"
     logInfoAt stx msg
 
+/-! ## Step properties: `<property>_step` -/
+
+/-- Resolve a persisted cell theorem `<action>_<property>` through the
+layouts the file family uses (the current namespace and its `Proofs` child,
+the module's canonical `Proofs`, the module itself). -/
+private def resolveCellTheorem (ns modName : Name) (cell : Name) : MetaM Name := do
+  let candidates := #[ns ++ cell, ns ++ `Proofs ++ cell, modName ++ `Proofs ++ cell, modName ++ cell]
+  for c in candidates do
+    if (← getEnv).contains c then return c
+  throwError "no persisted step cell theorem `{cell}` for module `{modName}` (tried \
+    {candidates.toList}) — persist the action's cells with `#prove_action` (or \
+    `#gen_theorems` inside the module) first."
+
+/-- Emit `<ns>.<property>_step` at an already-extracted canonical
+instantiation: the step property over every label of the transition
+system, from the assumptions and the invariants at the pre-state —
+`∀ {th s s' l}, (RTS).assumptions th → Invariants th s → (RTS).tr th s l s' → P th s s'`,
+one `Label.casesOn` case per action, each closed by the action's persisted
+step cell (`<action>_<property>`) through `derived_eq` and
+`Transition.step_of_meets`. Idempotent (`(fresh, lemmaName)`). Throws if a
+cell theorem is missing or an action is in `transition` syntax. -/
+def emitStepLemmaCore (c : CanonicalRTS) (ns modName prop : Name) : MetaM (Bool × Name) := do
+  let lemmaName := stepPropertyLemmaName ns prop
+  let stepApp ← instantiateByName (modName ++ prop) c.byName
+  let assuTy := fun th => mkAppN (mkConst ``RelationalTransitionSystem.assumptions)
+    #[c.ρ, c.σ, c.lbl, c.rtsApp, th]
+  let trAt := fun th s l s' => mkAppN (mkConst ``RelationalTransitionSystem.tr)
+    #[c.ρ, c.σ, c.lbl, c.rtsApp, th, s, l, s']
+  let indInfo ← getConstInfoInduct (modName ++ labelTypeName)
+  unless indInfo.levelParams.isEmpty do
+    throwError "`{modName ++ labelTypeName}` is universe-polymorphic — unsupported"
+  let lblParams := c.lbl.getAppArgs
+  withLocalDecl `th .implicit c.ρ fun th => do
+  withLocalDecl `s .implicit c.σ fun s => do
+  withLocalDecl `s' .implicit c.σ fun s' => do
+  withLocalDecl `l .implicit c.lbl fun l => do
+  withLocalDeclD `hassu (assuTy th) fun hassu => do
+  withLocalDeclD `hinv (mkApp2 c.invApp th s) fun hinv => do
+  withLocalDeclD `htr (trAt th s l s') fun htr => do
+    let goal := mkApp3 stepApp th s s'
+    -- motive : fun l => (RTS).tr th s l s' → P th s s'
+    let motive ← withLocalDeclD `l' c.lbl fun l' => do
+      mkLambdaFVars #[l'] (.forallE `htr (trAt th s l' s') goal .default)
+    let minors ← indInfo.ctors.toArray.mapM fun ctorName => do
+      let actionName := ctorName.replacePrefix (modName ++ labelTypeName) Name.anonymous
+      let extName := toExtName (modName ++ actionName)
+      let deqName := toDerivedEqName extName
+      unless (← getEnv).contains deqName do
+        throwError "`{deqName}` does not exist — `{actionName}` is a `transition`-syntax \
+          action, whose step cells cannot be bridged to the transition system (no \
+          `derived_eq` is generated for `Transition.toVeilM`-defined actions)."
+      let ctorApp0 := mkAppN (mkConst ctorName) lblParams
+      forallTelescope (← inferType ctorApp0) fun actArgs _ => do
+        let labelExpr := mkAppN ctorApp0 actArgs
+        withLocalDeclD `htr (trAt th s labelExpr s') fun htrA => do
+          -- `(RTS).tr th s (.a args) s'` is, by unfolding, the derived transition
+          -- of `a.ext` at the canonical spine; `derived_eq` takes it to `a.ext.tr`.
+          let nextActApp := mkAppN (mkConst (modName ++ assembledNextActName))
+            (c.nextActSpine.push labelExpr)
+          let extApp ← reduceToHeadConst extName nextActApp
+          let spineArgs := extApp.getAppArgs
+          let derivedTy := mkAppN (mkConst ``VeilM.toTransitionDerived)
+            #[c.mode, c.ρ, c.σ, c.α, extApp, th, s, s']
+          let htrD ← mkExpectedTypeHint htrA derivedTy
+          let deqApp := mkAppN (mkConst deqName) spineArgs
+          let eq ← mkCongrFun (← mkCongrFun (← mkCongrFun deqApp th) s) s'
+          let htrT ← mkEqMP eq htrD
+          let thmName ← resolveCellTheorem ns modName (Name.mkSimple s!"{actionName}_{prop}")
+          let thmApp := mkAppN (mkConst thmName) spineArgs
+          -- Loud, early failure if the theorem's telescope drifted from the spine.
+          check thmApp
+          let leaf ← mkAppM ``Transition.step_of_meets #[thmApp, th, s, s', hassu, hinv, htrT]
+          mkLambdaFVars (actArgs.push htrA) leaf
+    let casesName := modName ++ labelTypeName ++ `casesOn
+    let casesInfo ← getConstInfo casesName
+    let lvls := casesInfo.levelParams.map fun _ => Level.zero
+    let casesApp := mkAppN (mkConst casesName lvls) (lblParams ++ #[motive, l] ++ minors)
+    let fvars := c.binders ++ #[th, s, s', l, hassu, hinv, htr]
+    let stmt := remapLeadingToImplicit (← mkForallFVars fvars goal) c.binders.size
+    let fresh ← addTheoremIdempotent lemmaName stmt (← mkLambdaFVars fvars (mkApp casesApp htr))
+    return (fresh, lemmaName)
+
+/-- The module's step properties: from the persisted VC registry (the `.step`
+cells' property names, cross-file), else from the file-local module state
+(inside the defining module without a registry). -/
+private def stepPropertiesOf (modName : Name) : CommandElabM (Array Name) := do
+  if let some entries ← getVCRegistry? modName then
+    let props := entries.filter (·.style == .step) |>.map (·.property)
+    return props.foldl (init := #[]) fun a p => if a.contains p then a else a.push p
+  if let some mod := (← localEnv.get).currentModule then
+    if mod.name == modName then
+      return mod.stepProperties.map (·.name)
+  return #[]
+
+/-- Emit `<ns>.<property>_step` for every `step_property` of `modName` into
+the current namespace (silent when there are none). Called by
+`#gen_theorems` after the cells are persisted and by `#gen_composition`
+(idempotent). Best-effort per property, one summary message. -/
+def emitStepLemmas (stx : Syntax) (modName : Name) : CommandElabM Unit := do
+  let props ← stepPropertiesOf modName
+  if props.isEmpty then return
+  let ns ← getCurrNamespace
+  let t0 ← IO.monoMsNow
+  let outcome : Except MessageData (Array Name × Array Name × Array (Name × MessageData)) ←
+    try
+      liftTermElabM <| withCanonicalRTS modName fun c => do
+        let mut emitted : Array Name := #[]
+        let mut existing : Array Name := #[]
+        let mut skipped : Array (Name × MessageData) := #[]
+        for p in props do
+          try
+            let (fresh, lemmaName) ← emitStepLemmaCore c ns modName p
+            if fresh then emitted := emitted.push lemmaName
+            else existing := existing.push lemmaName
+          catch e =>
+            skipped := skipped.push (p, e.toMessageData)
+        return .ok (emitted, existing, skipped)
+    catch e => pure (.error e.toMessageData)
+  let dt := (← IO.monoMsNow) - t0
+  let list := fun (xs : Array Name) =>
+    MessageData.joinSep (xs.toList.map fun n => m!"`{n}`") ", "
+  match outcome with
+  | .error e =>
+    logInfoAt stx m!"no step lemmas emitted ({dt} ms):{indentD e}"
+  | .ok (emitted, existing, skipped) =>
+    let mut msg := m!"emitted {emitted.size} step lemma(s) ({dt} ms)"
+    unless emitted.isEmpty do
+      msg := msg ++ m!": {list emitted}"
+    unless existing.isEmpty do
+      msg := msg ++ m!"; {existing.size} already present (statement verified): {list existing}"
+    unless skipped.isEmpty do
+      msg := msg ++ m!"; not emitted for {skipped.size} step propert(y/ies):"
+      for (p, why) in skipped do
+        msg := msg ++ indentD m!"`{p}`: {why}"
+    logInfoAt stx msg
+
 /-! ## `#gen_composition` -/
 
 /-- Resolve an emitted preservation lemma (`step_<action>` / `init_case`),
@@ -569,9 +709,51 @@ def emitComposition (stx : Syntax) (modName : Name) : CommandElabM Unit := do
         let _ ← addTheoremIdempotent projName stmtP (← mkLambdaFVars outerFVars proof)
         nProj.modify (· + 1)
       pure (iorName, ← nProj.get)
+  -- `step_property` exports: `<P>_step` (over every label, from the
+  -- invariants) and `reachable_<P>_step` (along every step from a reachable
+  -- state, composing with `invariants_of_reachable`).
+  -- Best-effort per property: the composition's own products do not depend
+  -- on these, so a property whose cells are not persisted (or whose action
+  -- cannot be bridged) is reported, not fatal.
+  let props ← stepPropertiesOf modName
+  let skipped ← IO.mkRef (#[] : Array (Name × MessageData))
+  let nStep ← if props.isEmpty then pure 0 else
+    liftTermElabM <| withCanonicalRTS modName fun c => do
+      let n ← IO.mkRef (0 : Nat)
+      for p in props do
+        try
+          let (_, stepName) ← emitStepLemmaCore c ns modName p
+          let reachAt := fun (th st : Expr) => mkAppN (mkConst ``RelationalTransitionSystem.reachable)
+            #[c.ρ, c.σ, c.lbl, c.rtsApp, th, st]
+          let trAt := fun th s l s' => mkAppN (mkConst ``RelationalTransitionSystem.tr)
+            #[c.ρ, c.σ, c.lbl, c.rtsApp, th, s, l, s']
+          let stepApp ← instantiateByName (modName ++ p) c.byName
+          withLocalDecl `th .implicit c.ρ fun th => do
+          withLocalDecl `s .implicit c.σ fun s => do
+          withLocalDecl `s' .implicit c.σ fun s' => do
+          withLocalDecl `l .implicit c.lbl fun l => do
+          withLocalDeclD `hr (reachAt th s) fun hr => do
+          withLocalDeclD `htr (trAt th s l s') fun htr => do
+            let hassu ← mkAppM ``RelationalTransitionSystem.reachable_assumptions #[c.rtsApp, th, s, hr]
+            let hinv := mkAppN (mkConst iorName) (c.binders ++ #[th, s, hr])
+            let proof := mkAppN (mkConst stepName) (c.binders ++ #[th, s, s', l, hassu, hinv, htr])
+            let fvars := c.binders ++ #[th, s, s', l, hr, htr]
+            let stmt := remapLeadingToImplicit (← mkForallFVars fvars (mkApp3 stepApp th s s')) c.binders.size
+            let _ ← addTheoremIdempotent (reachableStepLemmaName ns p) stmt (← mkLambdaFVars fvars proof)
+            n.modify (· + 1)
+        catch e =>
+          skipped.modify (·.push (p, e.toMessageData))
+      n.get
   let dt := (← IO.monoMsNow) - t0
+  unless (← skipped.get).isEmpty do
+    let mut msg := m!"#gen_composition {modName}: step exports not emitted for \
+      {(← skipped.get).size} step propert(y/ies):"
+    for (p, why) in (← skipped.get) do
+      msg := msg ++ indentD m!"`{p}`: {why}"
+    logWarningAt stx msg
+  let stepNote := if nStep == 0 then m!"" else m!" + {nStep} step propert(y/ies) (`<property>_step`, `reachable_<property>_step`)"
   logInfoAt stx m!"#gen_composition {modName}: `{iorName}` + {nProj} named \
-    `reachable_*` projections ({dt} ms)"
+    `reachable_*` projections{stepNote} ({dt} ms)"
 
 @[command_elab Veil.genComposition]
 def elabGenComposition : CommandElab := fun stx => do

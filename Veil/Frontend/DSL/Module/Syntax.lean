@@ -61,6 +61,7 @@ scoped syntax (name := kw_invariant) "invariant" : veilKeyword
 scoped syntax (name := kw_safety) "safety" : veilKeyword
 scoped syntax (name := kw_termination) "termination" : veilKeyword
 scoped syntax (name := kw_state_constraint) "state_constraint" : veilKeyword
+scoped syntax (name := kw_step_property) "step_property" : veilKeyword
 
 scoped syntax (name := kw_gen_spec) "#gen_spec" : veilKeyword
 scoped syntax (name := kw_gen_theorems) "#gen_theorems" : veilKeyword
@@ -297,6 +298,26 @@ scoped syntax (name := stateConstraintKind) kw_state_constraint : propertyKind
 
 /-- An assertion. -/
 scoped syntax (name := assertionDeclaration) propertyKind (propertyName)? term : command
+
+/-- A `step_property` is a two-state property, stated over a pre-state and a
+post-state with the primed-component notation of `transition` bodies (`f` is
+the pre-state component, `f'` the post-state one; capitalised variables are
+universally quantified, as in `invariant`):
+
+```lean
+step_property [opened_mono] { opened I S → opened' I S }
+```
+
+It is checked once per action — under the module's assumptions and its
+invariants at the pre-state, exactly as an invariant-preservation cell — and
+appears in the verification-condition grid, the persistent VC registry and
+`#veil_status` like any other cell. Step properties are conclusions only:
+no cell assumes another step property. `#gen_theorems` and
+`#gen_composition` additionally emit `<property>_step`, the property over
+every label of the transition system, and `#gen_composition` emits
+`reachable_<property>_step`, the property along every step from a reachable
+state. -/
+scoped syntax (name := stepPropertyDeclaration) kw_step_property (propertyName)? "{" term "}" : command
 
 /-- Assemble the specification. -/
 scoped syntax (name := genSpec) kw_gen_spec : command

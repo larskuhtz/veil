@@ -25,6 +25,9 @@ inductive VCStyle where
   | wp
   /-- Transition style: uses Transition semantics. -/
   | tr
+  /-- Step-property style: Transition semantics with a two-state
+  postcondition (`step_property` cells). -/
+  | step
 deriving Inhabited, BEq, Hashable
 
 instance : ToString VCStyle where
@@ -32,12 +35,14 @@ instance : ToString VCStyle where
     match style with
     | .wp => "wp"
     | .tr => "tr"
+    | .step => "step"
 
 instance : ToJson VCStyle where
   toJson style :=
     match style with
     | .wp => "wp"
     | .tr => "tr"
+    | .step => "step"
 
 instance : FromJson VCStyle where
   fromJson? json := do
@@ -45,6 +50,7 @@ instance : FromJson VCStyle where
     match s with
     | "wp" => pure .wp
     | "tr" => pure .tr
+    | "step" => pure .step
     | _ => .error s!"Invalid VCStyle: {s}"
 
 /-! ## Induction VC Metadata -/
