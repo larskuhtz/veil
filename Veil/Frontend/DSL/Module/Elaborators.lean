@@ -5,6 +5,7 @@ import Veil.Frontend.DSL.Module.Syntax
 import Veil.Frontend.DSL.Infra.EnvExtensions
 import Veil.Frontend.DSL.Infra.SolverHypotheses
 import Veil.Frontend.DSL.Module.Util
+import Veil.Frontend.DSL.Module.StepLemmas
 import Veil.Frontend.DSL.Action.Elaborators
 import Veil.Frontend.DSL.State.SubState
 import Veil.Frontend.DSL.State.ConcreteRegistry
@@ -438,6 +439,12 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
     if (← isExecutableActionsEnabled) && !(← isModelCheckScaffoldingEnabled) then
       Extract.runGenExtractCommand mod
     pure mod
+  -- Frame / monotonicity / initial-value lemmas derived from the pre-computed
+  -- transitions (`veil.gen.stepLemmas`; solver-free, kernel-checked, silent).
+  -- See `Module/StepLemmas.lean`.
+  unless (← isModelCheckCompileMode) do
+    if ← isStepLemmasEnabled then
+      mod.emitStepLemmas
   unless (← isModelCheckCompileMode) do
     Verifier.runManager
     -- The manager has been reset for this elaboration; cross-file check
