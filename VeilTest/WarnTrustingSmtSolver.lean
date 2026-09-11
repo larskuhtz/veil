@@ -2,6 +2,13 @@ import Veil
 
 set_option warn.sorry false
 set_option veil.smt.trust true
+-- This file is about the *warning*, so the solver has to be what proves
+-- the cells. `keep` writes nothing at all, so the cheap rung
+-- (`veil.vc.cheapRung`) closes both invariant cells without the solver
+-- and the warning disappears — which is the rung doing its job (it
+-- shrinks the trusted set; `VeilTest/CheapRung.lean` pins that), not a
+-- regression here.
+set_option veil.vc.cheapRung false
 
 veil module WarnTrustingSmtSolver
 

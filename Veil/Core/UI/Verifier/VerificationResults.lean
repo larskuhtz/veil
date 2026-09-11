@@ -10,6 +10,7 @@ import Veil.Frontend.DSL.Infra.Metadata
 import Veil.Core.Tools.Verifier.Results
 import Veil.Core.Tools.Verifier.Server
 import Veil.Util.ProofCache
+import Veil.Util.CheapRung
 
 section
 
@@ -452,6 +453,24 @@ private def formatProofCacheNote [Monad m] [MonadOptions m] [MonadLiftT BaseIO m
   return some m!"♻ proof cache (`veil.cache.proofs`): {hits} hits (each \
     re-checked against the live goal), {stores} stored.\n"
 
+/-- One ⚡ summary line for the cheap non-SMT rung (`veil.vc.cheapRung`).
+
+The ladder `first | veil_solve_frame … | veil_solve_wp` is one attempt as
+far as the manager is concerned, so the per-discharger names cannot say
+which branch won — and the hit rate is exactly the number that says
+whether the rung pays for itself. Process-cumulative counters; per-cell
+detail on `trace.veil.cheapRung`. Shown only when
+`veil.report.cheapRung` is set, so that sweep output stays deterministic
+under `#guard_msgs`. -/
+private def formatCheapRungNote [Monad m] [MonadOptions m] [MonadLiftT BaseIO m] :
+    m (Option MessageData) := do
+  unless veil.report.cheapRung.get (← getOptions) do return none
+  let (attempts, wins) ← (CheapRung.stats.get : BaseIO _)
+  if attempts == 0 then return none
+  return some m!"⚡ cheap rung (`veil.vc.cheapRung`): {wins}/{attempts} cells \
+    closed without a solver ({wins * 100 / attempts}%); the rest fell through \
+    to the SMT rung.\n"
+
 /-- Format verification results as text output for logging. -/
 def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
     (results : VerificationResults VCMetadata SmtResult) : m MessageData := do
@@ -503,6 +522,8 @@ def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
     msg := msg ++ retainedMsg
   if let some cacheMsg ← formatProofCacheNote then
     msg := msg ++ cacheMsg
+  if let some cheapMsg ← formatCheapRungNote then
+    msg := msg ++ cheapMsg
   return msg
 
 /-- Check if any VCs have non-proven status. -/
