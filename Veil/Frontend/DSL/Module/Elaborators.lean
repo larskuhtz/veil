@@ -707,8 +707,7 @@ def elabProveVC : CommandElab := fun stx => do
           ({actionName}, {propName}) in its VC registry"
     let term : Term ←
       if stx[4].isNone then
-        let tac ← e.dischargeTactic
-        `(by $tac:tactic)
+        e.dischargeTerm modName
       else
         let tacSeq : TSyntax ``Lean.Parser.Tactic.tacticSeq := ⟨stx[4][1]⟩
         `(by $tacSeq)

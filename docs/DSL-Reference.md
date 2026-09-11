@@ -433,3 +433,59 @@ unsat trace {
 ```
 
 Note that checking time grows exponentially with the trace length.
+
+#### The Cheap Discharger Rung
+
+Most verification conditions in a Veil development are *frame* obligations:
+the action writes nothing the invariant reads, so the invariant survives for
+free. An SMT solver proves each of those from scratch, at seconds apiece.
+
+With `veil.vc.cheapRung` (on by default) each invariant-preservation cell's
+discharger term is a two-rung ladder instead of the SMT tactic alone:
+
+```lean
+by first | veil_solve_frame <invariant> | veil_solve_wp
+```
+
+`veil_solve_frame` applies the generated local-WP bridge theorem, simplifies
+the *goal* only, projects the named conjunct out of the invariant clump, and
+closes what is left. After that bridge a frame cell's goal is already the
+invariant at the pre-state behind the action's guards — Veil's own WP
+simplification has eliminated the untouched post-state fields — so there is
+nothing left to prove, only the right conjunct to find. That is a property of
+the WP machinery, not of any particular protocol.
+
+The rung is *tried*, never predicted. It either closes the goal or fails, and
+failure falls through to the solver, so this changes how cells are proven,
+not what is proven: both paths end in a kernel-checked term, and the cheap
+path removes the solver from the loop entirely for the cells it closes — in
+`veil.smt.trust true` mode that means those cells leave the trusted set.
+Retry dischargers (`veil.smt.retries`) carry the SMT tactic alone: a retry is
+only scheduled after an attempt timed out, by which point the rung has
+already failed on that cell.
+
+The hit rate is what says whether the ladder pays, and `first` hides it (one
+attempt, no record of which branch won). Two ways to see it:
+
+```lean
+set_option veil.report.cheapRung true   -- one ⚡ line at the end of the sweep
+set_option trace.veil.cheapRung true    -- per cell, incl. why a rung declined
+```
+
+`veil.vc.cheapRung` is read at `#gen_spec` for a module's own VCs (the ladder
+is baked into the discharger term there) and where they run for the
+cross-file registry commands.
+
+The two tactics it is built from are available for manual cells:
+
+* `unveil_local` — the cheap counterpart of `unveil`. Same goal shape, but it
+  simplifies the goal only and leaves the invariant clump untouched. On a
+  model with a large clump `unveil`'s closing `veil_simp at *` dominates
+  everything else (measured on a ~3900-cell case study: ~22 s per cell
+  against ~0.4 s).
+* `veil_inv_have h := <invariant>` — bind the conjunct of the clump belonging
+  to a named `invariant`/`safety` declaration, normalised the way `unveil`
+  would have normalised it. The projection chain is derived from the module's
+  own assembled `Invariants`, so it cannot drift when a declaration is added
+  or reordered, and the tactic fails loudly if the clump shape no longer
+  matches the declaration list.

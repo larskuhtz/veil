@@ -30,6 +30,7 @@ initialize
   registerTraceClass `veil.wp
   registerTraceClass `veil.timing
   registerTraceClass `veil.extraction
+  registerTraceClass `veil.cheapRung
   -- Performance trace classes (integrate with Lean's profiler)
   registerTraceClass `veil.perf (inherited := true)
   registerTraceClass `veil.perf.elaborator
@@ -215,6 +216,31 @@ register_option veil.smt.retryTimeout : Nat := {
   Must be set before `#gen_spec`."
 }
 
+register_option veil.vc.cheapRung : Bool := {
+  defValue := true
+  descr := "If true (default), each invariant-preservation VC's discharger \
+  term is a two-rung ladder — `by first | veil_solve_frame <invariant> | \
+  veil_solve_wp` — instead of the SMT tactic alone. Most VCs in a Veil \
+  development are *frame* obligations: the action writes nothing the \
+  invariant reads, so after the local-WP bridge the goal is already the \
+  invariant at the pre-state behind the action's guards, and projecting \
+  the right conjunct out of the invariant clump closes it without a \
+  solver. On a ~3900-cell case study 96% of (action, property) pairs are \
+  footprint-disjoint; the cheap rung closed 90 of 98 properties of one \
+  action at a median of ~0.1 s against cvc5's median 2.6 s, and a wrong \
+  guess cost ~0.14 s. The rung is tried, never predicted: it either \
+  closes the goal or fails, and failure falls through to the SMT rung, \
+  so this changes *how* cells are proven, not what is proven — both \
+  paths end in a kernel-checked term, and the cheap path removes the \
+  solver from the loop entirely for the cells it closes. Retry rungs \
+  (`veil.smt.retries`) never carry the ladder: the cheap branch has \
+  already failed by the time a retry is scheduled. The hit rate is \
+  reported as one ⚡ line by `#check_invariants`; per-cell detail is on \
+  `trace.veil.cheapRung`. For a module's own VCs the ladder is baked \
+  into the discharger term at `#gen_spec`, so this must be set before \
+  it; the cross-file registry commands read it where they run."
+}
+
 register_option veil.gen.strictLocalSimp : Bool := {
   defValue := true
   descr := "If true (default), failing to synthesize the local \
@@ -243,6 +269,20 @@ register_option veil.report.slowVCsMinMs : Nat := {
   deterministic for fast specifications (e.g. under `#guard_msgs` in tests) \
   while still surfacing the tail on long-running sweeps. Lower it to \
   investigate moderately slow VCs."
+}
+
+register_option veil.report.cheapRung : Bool := {
+  defValue := false
+  descr := "If true, `#check_invariants` ends with one ⚡ line giving the \
+  cheap rung's hit rate (`veil.vc.cheapRung`): how many cells were closed \
+  without a solver, out of how many the rung was tried on. `first | … | …` \
+  is a single attempt as far as the manager is concerned, so the \
+  per-discharger names (`…_0_WP`) cannot say which branch won — this is \
+  the number that says whether the ladder pays. Off by default so that \
+  sweep output stays deterministic under `#guard_msgs` (the same reason \
+  `veil.report.slowVCsMinMs` has a floor); per-cell detail, including why \
+  a rung declined, is on `trace.veil.cheapRung`, and \
+  `Veil.CheapRung.stats` holds the counters for programmatic checks."
 }
 
 register_option veil.report.nearTimeoutPercent : Nat := {

@@ -339,6 +339,31 @@ private def VCManager.addRetryDischargers
     mgr.mkAddDischarger vcId (VCDischarger.fromTerm term actName
       (nameSuffix := s!"{nameSuffix}_retry{k}") (attempt := k))
 
+/-- The discharger *term* of a WP invariant-preservation cell: the cheap
+non-SMT rung (`veil.vc.cheapRung`) in front of the SMT tactic, as one
+`first` inside the *existing* discharger's term.
+
+Still one discharger per VC. Rungs of a single VC are sequential *across
+tasks* — `VerificationCondition.nextDischarger?` yields nothing while one
+is running — so a separate frame discharger would cost a manager
+round-trip per cell and grow the array `VCManager.inFlightCount` walks,
+for no gain. In the term, the cheap branch parallelises exactly as the
+SMT branch does today and keeps the `.dedicated` thread the task already
+has, which the fall-through path still needs for the solver's blocking
+FFI.
+
+`invFullName` is the invariant's assembled constant (`<mod>.<prop>`):
+`veil_solve_frame` resolves it to find the module's `Invariants` and the
+conjunct's position in the clump. A name that is not in the environment
+gets no rung at all — a plain SMT term beats a rung that can only ever
+fail. -/
+private def mkWpDischargeTerm [Monad m] [MonadEnv m] [MonadOptions m] [MonadQuotation m]
+    (invFullName : Name) (smtTac : TSyntax `tactic) : m Term := do
+  if veil.vc.cheapRung.get (← getOptions) && (← getEnv).contains invFullName then
+    `(term| by first | veil_solve_frame $(mkIdent invFullName) | $smtTac:tactic)
+  else
+    `(term| by $smtTac:tactic)
+
 /-- Generate doesNotThrow VCs for all actions.
     These VCs check that actions don't throw exceptions assuming the invariants hold. -/
 def Module.generateDoesNotThrowVCs (mod : Module) : CommandElabM Unit := do
@@ -364,8 +389,11 @@ def Module.generateInvariantVCs (mod : Module) : CommandElabM Unit := do
   let actsToCheck := mod.actsToCheck
   let wpSolve ← `(tactic| veil_solve_wp)
   let trSolve ← `(tactic| veil_solve_tr)
-  let wpTactic ← `(by $wpSolve:tactic)
   let trTactic ← `(by $trSolve:tactic)
+  -- Retry dischargers deliberately carry the SMT tactic alone: a retry is
+  -- only ever scheduled after an attempt of the same VC timed out, by
+  -- which point the cheap rung has already failed on that cell. Re-running
+  -- it would be pure waste, once per retry.
   let wpRetries ← mkRetryTerms wpSolve
   let trRetries ← mkRetryTerms trSolve
   -- Prepare all VC data outside the lock
@@ -378,11 +406,14 @@ def Module.generateInvariantVCs (mod : Module) : CommandElabM Unit := do
       let trVC ← mkMeetsSpecificationIfSuccessfulClauseTrVC mod act.name
         act.declarationKind invClause.name
         (if trPrimary then InductionVCKind.primary else InductionVCKind.alternative)
-      return acc'.push (act, wpVC, trVC, trPrimary)
+      -- The cheap rung needs the invariant's name, so the WP term is built
+      -- per clause rather than once for the module.
+      let wpTactic ← mkWpDischargeTerm (mod.name ++ invClause.name) wpSolve
+      return acc'.push (act, wpVC, trVC, trPrimary, wpTactic)
     return acc ++ clauseVCs
   -- Add all VCs atomically
   Verifier.withVCManager fun ref => do
-    for (act, wpVC, trVC, trPrimary) in vcData do
+    for (act, wpVC, trVC, trPrimary, wpTactic) in vcData do
       let mgr ← ref.get
       let mgr ←
         if trPrimary then do
@@ -511,6 +542,22 @@ def VCRegistryEntry.dischargeTactic (e : VCRegistryEntry) :
     | .wp => `(tactic| veil_solve_wp)
     | .tr => `(tactic| veil_solve_tr)
 
+/-- The discharger *term* for a registry entry, i.e. `dischargeTactic`
+with the cheap non-SMT rung (`veil.vc.cheapRung`) in front of it where it
+applies — the cross-file twin of `mkWpDischargeTerm`. WP cells only: the
+rung goes through the local-WP bridge, and a `doesNotThrow` cell has no
+invariant to project. Retry dischargers keep the bare tactic.
+
+Public: `#prove_vc` uses it as the default proof term. -/
+def VCRegistryEntry.dischargeTerm (modName : Name) (e : VCRegistryEntry) :
+    CommandElabM Term := do
+  let tac ← e.dischargeTactic
+  match e.style with
+  | .wp =>
+    if e.property == `doesNotThrow then `(by $tac:tactic)
+    else mkWpDischargeTerm (modName ++ e.property) tac
+  | _ => `(by $tac:tactic)
+
 private def VCRegistryEntry.nameSuffix (e : VCRegistryEntry) : String :=
   match e.style with | .wp => "_WP" | .tr => "_TR"
 
@@ -554,8 +601,7 @@ def generateVCsFromRegistry (modName : Name)
         typeExpr? := some e.type, metadata := e.vcMetadata }
       let addDischargers (mgr : VCManager VCMetadata SmtResult) (vcId : VCId)
           (e : VCRegistryEntry) : CommandElabM (VCManager VCMetadata SmtResult) := do
-        let tac ← e.dischargeTactic
-        let term ← `(by $tac:tactic)
+        let term ← e.dischargeTerm modName
         let mgr ← mgr.mkAddDischarger vcId
           (VCDischarger.fromTerm term e.action (nameSuffix := e.nameSuffix))
         mgr.addRetryDischargers vcId e.action e.nameSuffix (← retriesFor e)
