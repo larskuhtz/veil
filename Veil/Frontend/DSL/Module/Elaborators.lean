@@ -710,6 +710,7 @@ def elabProveAction : CommandElab := fun stx => do
       if e.action == actionName && e.kind == .primary
           && !(← getEnv).contains (ns.append e.name) then
         if let some ms ← liftCoreM <| ProofCache.replayPersist? (ns.append e.name) [] e.type then
+          addVeilDeclarationRanges (ns.append e.name) stx
           logInfoAt stx m!"cell ({e.action}, {e.property}): ♻ kernel replay ({ms} ms)"
     let env ← getEnv
     let preproven := allEntries.filter fun e =>
@@ -775,6 +776,7 @@ def elabProveVC : CommandElab := fun stx => do
     -- term directly — that `addDecl` IS the kernel check; a miss or a
     -- kernel rejection falls through to the tactic path below.
     if let some ms ← liftCoreM <| ProofCache.replayPersist? fullName [] e.type then
+      addVeilDeclarationRanges fullName stx
       logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} \
         in {ms} ms (♻ kernel replay)"
       return
@@ -793,6 +795,7 @@ def elabProveVC : CommandElab := fun stx => do
       addDecl (.thmDecl {
         name := fullName, levelParams := []
         «type» := e.type, value := proof })
+      addVeilDeclarationRanges fullName stx
       return proof
     let t1 ← IO.monoMsNow
     let wasHit := (← ProofCache.statsHits) > hits0
