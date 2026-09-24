@@ -176,6 +176,7 @@ def elabEnumDeclaration : CommandElab := fun stx => do
     -- Declare an axiomatisation class for the enum type
     let (class_name, class_decl) ← mkEnumAxiomatisation id elems
     elabVeilCommand class_decl
+    addVeilStructureRanges ((← getCurrNamespace) ++ class_name.getId) stx
     -- Declare the concrete type and show it satisfies the axiomatisation
     for cmd in (← mkEnumConcreteType id elems) do
       elabVeilCommand cmd
@@ -231,6 +232,14 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
   for stx in stateStxs ++ theoryStxs ++ instantiationStxs do
     elabVeilCommand stx
   generateIgnoreFn mod
+  -- The generated structures' fields are built from position-less
+  -- identifiers; attribute each to the user declaration it comes from.
+  let ns ← getCurrNamespace
+  for sc in mod.mutableComponents do
+    addVeilDeclarationRanges (ns ++ stateName ++ sc.name) sc.userSyntax
+  for p in mod.parameters do
+    if p.kind matches .sort _ | .userParameter then
+      addVeilDeclarationRanges (ns ++ instantiationTypeName ++ p.name) p.userSyntax
   let mod := { mod with _stateDefined := true }
   if mod._useLocalRPropTC && !(← isModelCheckCompileMode) then
     let stxs ← liftTermElabM mod.declareLocalTheoryPropTC
@@ -245,6 +254,10 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
       elabVeilCommand cmd
     catch ex =>
       logWarning m!"unable to generate transition weakening lemma: {ex.toMessageData}"
+  -- The structures' constructors and the typeclasses' members are not
+  -- covered by the attribution above: they belong to this command.
+  for s in [stateName, theoryName, instantiationTypeName, localRPropTCName, localTheoryPropTCName] do
+    addVeilStructureRanges (ns ++ s) (← getRef)
   pure mod
 
 private def warnIfNoInvariantsDefined (mod : Module) : CommandElabM Unit := do
@@ -320,6 +333,7 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
   if !actionNames.isEmpty && !(← isModelCheckCompileMode) then
     let (className, classDecl) ← mkEnumAxiomatisation actionTagType actionNames
     elabVeilCommand classDecl
+    addVeilStructureRanges ((← getCurrNamespace) ++ className.getId) stx
     for cmd in (← mkEnumConcreteType actionTagType actionNames) do
       elabVeilCommand cmd
     elabVeilCommand $ ← `(open $className:ident)
