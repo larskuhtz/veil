@@ -248,6 +248,7 @@ private def addTheoremIdempotent (name : Name) (stmt value : Expr) : MetaM Bool 
         refusing to overwrite. Existing:{indentExpr info.type}\nEmitting:{indentExpr stmt}"
     return false
   addDecl (.thmDecl { name, levelParams := [], «type» := stmt, value })
+  addVeilDeclarationRanges name (← getRef)
   return true
 
 /-- Everything a composition leaf needs: the triple points of the transition

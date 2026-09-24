@@ -180,6 +180,7 @@ def elabEnumDeclaration : CommandElab := fun stx => do
     -- Declare an axiomatisation class for the enum type
     let (class_name, class_decl) ← mkEnumAxiomatisation id elems
     elabVeilCommand class_decl
+    addVeilStructureRanges ((← getCurrNamespace) ++ class_name.getId) stx
     -- Declare the concrete type and show it satisfies the axiomatisation
     for cmd in (← mkEnumConcreteType id elems) do
       elabVeilCommand cmd
@@ -253,6 +254,14 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
     catch ex =>
       trace[veil.debug] "no `Inhabited` instance for the abstract state: {ex.toMessageData}"
     generateIgnoreFn mod
+    -- The generated structures' fields are built from position-less
+    -- identifiers; attribute each to the user declaration it comes from.
+    let ns ← getCurrNamespace
+    for sc in mod.mutableComponents do
+      addVeilDeclarationRanges (ns ++ stateName ++ sc.name) sc.userSyntax
+    for p in mod.parameters do
+      if p.kind matches .sort _ | .userParameter then
+        addVeilDeclarationRanges (ns ++ instantiationTypeName ++ p.name) p.userSyntax
     let mod := { mod with _stateDefined := true }
     if mod._useLocalRPropTC && !(← isModelCheckCompileMode) then
       let stxs ← liftTermElabM mod.declareLocalTheoryPropTC
@@ -267,6 +276,10 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
         elabVeilCommand cmd
       catch ex =>
         logWarning m!"unable to generate transition weakening lemma: {ex.toMessageData}"
+    -- The structures' constructors and the typeclasses' members are not
+    -- covered by the attribution above: they belong to this command.
+    for s in [stateName, theoryName, instantiationTypeName, localRPropTCName, localTheoryPropTCName] do
+      addVeilStructureRanges (ns ++ s) (← getRef)
     pure mod
 
 /-- Solver-relevant options as (name, value) pairs. Used to detect when a
@@ -408,6 +421,7 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
   if !actionNames.isEmpty && !(← isModelCheckCompileMode) && (← isModelCheckScaffoldingEnabled) then
     let (className, classDecl) ← mkEnumAxiomatisation actionTagType actionNames
     elabVeilCommand classDecl
+    addVeilStructureRanges ((← getCurrNamespace) ++ className.getId) stx
     for cmd in (← mkEnumConcreteType actionTagType actionNames) do
       elabVeilCommand cmd
     elabVeilCommand $ ← `(open $className:ident)
@@ -756,6 +770,7 @@ def elabProveAction : CommandElab := fun stx => do
       if e.action == actionName && e.kind == .primary
           && !(← getEnv).contains (ns.append e.name) then
         if let some ms ← liftCoreM <| ProofCache.replayPersist? (ns.append e.name) [] e.type then
+          addVeilDeclarationRanges (ns.append e.name) stx
           logInfoAt stx m!"cell ({e.action}, {e.property}): ♻ kernel replay ({ms} ms)"
     let env ← getEnv
     let preproven := allEntries.filter fun e =>
@@ -820,6 +835,7 @@ def elabProveVC : CommandElab := fun stx => do
     -- term directly — that `addDecl` IS the kernel check; a miss or a
     -- kernel rejection falls through to the tactic path below.
     if let some ms ← liftCoreM <| ProofCache.replayPersist? fullName [] e.type then
+      addVeilDeclarationRanges fullName stx
       logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} \
         in {ms} ms (♻ kernel replay)"
       return
@@ -838,6 +854,7 @@ def elabProveVC : CommandElab := fun stx => do
       addDecl (.thmDecl {
         name := fullName, levelParams := []
         «type» := e.type, value := proof })
+      addVeilDeclarationRanges fullName stx
       return proof
     let t1 ← IO.monoMsNow
     let wasHit := (← ProofCache.statsHits) > hits0
