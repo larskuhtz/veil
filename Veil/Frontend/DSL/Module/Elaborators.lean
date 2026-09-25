@@ -251,6 +251,7 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
     let ns ← getCurrNamespace
     for sc in mod.mutableComponents do
       addVeilDeclarationRanges (ns ++ stateName ++ sc.name) sc.userSyntax
+      addVeilDefinitionSiteInfo (veilDeclSelectionRef sc.userSyntax) (ns ++ stateName ++ sc.name)
     for p in mod.parameters do
       if p.kind matches .sort _ | .userParameter then
         addVeilDeclarationRanges (ns ++ instantiationTypeName ++ p.name) p.userSyntax
@@ -849,6 +850,7 @@ def elabProcedure : CommandElab := fun stx => do
     | `(command|procedure $nm:ident $br:explicitBinders ? {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.procedure nm.getId) br .none l stx
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
+    addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
 
 @[command_elab Veil.transitionDefinition]
 def elabTransition : CommandElab := fun stx => do
@@ -885,6 +887,7 @@ def elabTransition : CommandElab := fun stx => do
       -- Command.liftTermElabM $ warnIfNotFirstOrder nm.getId
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
+    addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
 
 @[command_elab Veil.procedureDefinitionWithSpec]
 def elabProcedureWithSpec : CommandElab := fun stx => do
@@ -899,6 +902,7 @@ def elabProcedureWithSpec : CommandElab := fun stx => do
     | `(command|procedure $nm:ident $br:explicitBinders ? $spec:doSeq {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.procedure nm.getId) br spec l stx
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
+    addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
 
 @[command_elab Veil.ghostRelationDefinition, command_elab Veil.ghostFunctionDefinition]
 def elabGhostDefinition : CommandElab := fun stx => do
@@ -915,6 +919,7 @@ def elabGhostDefinition : CommandElab := fun stx => do
       mod.defineGhostDefinition nm.getId br t (justTheory := forTheory.isSome) (isRelation := false) (retType := retTy)
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
+    addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
 
 @[command_elab Veil.assertionDeclaration]
 def elabAssertion : CommandElab := fun stx => do
@@ -944,6 +949,8 @@ def elabAssertion : CommandElab := fun stx => do
     let mod' ← mod.defineAssertion assertion
   --   dbg_trace s!"Elaborated assertion: {← liftTermElabM <|Lean.PrettyPrinter.formatTactic stx}"
     localEnv.modifyModule (fun _ => mod')
+    unless stx[1].isNone do
+      addVeilDefinitionSiteInfo stx[1][0][1] ((← getCurrNamespace) ++ assertion.name)
 
 /-- A `step_property` body may prime any mutable component (`f'` is its
 post-state value). An immutable component has no post-state: say so at the
