@@ -220,6 +220,17 @@ private def generateIgnoreFn (mod : Module) : CommandElabM Unit := do
     return ignoreFnStx
   elabVeilCommand cmd
 
+/-- Attach every pending doc comment whose constant now exists, as that
+constant's docstring, and keep the rest pending. -/
+def Module.attachPendingDocs (mod : Module) : CommandElabM Module := do
+  let mut pending := #[]
+  for pd in mod._pendingDocs do
+    let env ← getEnv
+    if let some c := pd.candidates.find? env.contains then
+      liftTermElabM <| addDocString c Syntax.missing pd.doc
+    else
+      pending := pending.push pd
+  return { mod with _pendingDocs := pending }
 
 /-- Crystallizes the state of the module, i.e. it defines it as a Lean
 `structure` definition, if that hasn't already happened.
@@ -281,7 +292,8 @@ private def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := 
     -- covered by the attribution above: they belong to this command.
     for s in [stateName, theoryName, instantiationTypeName, localRPropTCName, localTheoryPropTCName] do
       addVeilStructureRanges (ns ++ s) (← getRef)
-    pure mod
+    -- Doc comments on state components and parameters: their fields exist now.
+    mod.attachPendingDocs
 
 /-- Solver-relevant options as (name, value) pairs. Used to detect when a
 check command runs under different solver options than the VCs' dischargers
@@ -1054,6 +1066,71 @@ def elabStepProperty : CommandElab := fun stx => do
     localEnv.modifyModule (fun _ => mod')
     unless stx[1].isNone do
       addVeilDefinitionSiteInfo stx[1][0][1] ((← getCurrNamespace) ++ assertion.name)
+
+/-- The Veil commands a doc comment can document: those that declare
+something. -/
+private def documentableKinds : Array SyntaxNodeKind := #[
+  ``Veil.typeDeclaration, ``Veil.enumDeclaration, ``Veil.parameterDeclaration,
+  ``Veil.instanceDeclaration, ``Veil.stateComponentDeclaration,
+  ``Veil.ghostRelationDefinition, ``Veil.ghostFunctionDefinition,
+  ``Veil.initializerDefinition, ``Veil.transitionDefinition,
+  ``Veil.procedureDefinition, ``Veil.procedureDefinitionWithSpec,
+  ``Veil.assertionDeclaration, ``Veil.stepPropertyDeclaration]
+
+/-- The constants that can carry the docstring of the Veil declaration
+`name`, in order of preference. A state component is a field of the
+generated `State` (mutable) or `Theory` (immutable) structure; a sort, a
+parameter or an instantiated class is a field of `Instantiation` or
+`Theory`; everything else is a constant of its own name. -/
+private def docCandidates (mod : Module) (ns name : Name) : Array Name :=
+  match mod._declarations[name]? with
+  | some (.stateComponent .mutable _) => #[ns ++ stateName ++ name]
+  | some (.stateComponent .immutable _) => #[ns ++ theoryName ++ name]
+  | some .moduleParameter | none =>
+    #[ns ++ instantiationTypeName ++ name, ns ++ theoryName ++ name]
+  | some _ => #[ns ++ name]
+
+/-- Elaborate `/-- doc -/ <veil declaration>` (`documentedDeclaration`):
+elaborate the declaration, then make `doc` the docstring of the constant it
+generated.
+
+The documented name is the first identifier of the command that names
+something the command newly declared — the name the user wrote. A command
+that writes no name (an unnamed assertion, `after_init`) documents what it
+declared, other than derived definitions. A constant that does not exist
+yet — a state component's or a parameter's field, generated with the
+state — gets its docstring when the state is generated. -/
+@[command_elab Veil.documentedDeclaration]
+def elabDocumentedDeclaration : CommandElab := fun stx => do
+  let doc : TSyntax ``Lean.Parser.Command.docComment := ⟨stx[0]⟩
+  let decl := stx[1]
+  if decl.isOfKind ``Lean.Parser.Command.in then
+    throwErrorAt doc "unexpected doc comment: write it after `… in`, directly in \
+      front of the declaration it documents"
+  unless documentableKinds.contains decl.getKind do
+    throwErrorAt doc "unexpected doc comment: it documents a declaration, and this \
+      command declares nothing"
+  let before ← getCurrentModule (errMsg := "You cannot declare anything outside of a Veil module!")
+  elabCommand decl
+  let mod ← getCurrentModule
+  let declared := mod._declarations.keys.filter (!before._declarations.contains ·)
+    ++ (mod.parameters.map (·.name) |>.toList.filter fun n =>
+          !before.parameters.any (·.name == n) && !before._declarations.contains n)
+  let declared := declared.eraseDups
+  -- Without a written name, the derived definitions that come with the
+  -- declaration (`initializer.do`, …) are not what the comment describes.
+  let primary := declared.filter fun n =>
+    !(mod._declarations[n]? matches some (.derivedDefinition ..))
+  let targets := match decl.find? (fun s => s.isIdent && declared.contains s.getId) with
+    | some id => [id.getId]
+    | none => if primary.isEmpty then declared else primary
+  if targets.isEmpty then
+    logWarningAt doc "this doc comment documents nothing: the declaration generated no new name"
+    return
+  let ns ← getCurrNamespace
+  let pending := targets.toArray.map fun n => { name := n, candidates := docCandidates mod ns n, doc }
+  let mod ← { mod with _pendingDocs := mod._pendingDocs ++ pending }.attachPendingDocs
+  localEnv.modifyModule (fun _ => mod)
 
 @[command_elab Veil.genSpec]
 def elabGenSpec : CommandElab := fun stx => do

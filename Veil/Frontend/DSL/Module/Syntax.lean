@@ -319,6 +319,21 @@ every label of the transition system, and `#gen_composition` emits
 state. -/
 scoped syntax (name := stepPropertyDeclaration) kw_step_property (propertyName)? "{" term "}" : command
 
+/-- A doc comment in front of a Veil declaration — a sort, enum, parameter,
+instantiated class, state component, ghost definition, initializer,
+procedure, action, transition, assertion or step property. The declaration
+elaborates unchanged, and the doc comment becomes the docstring of the
+constant it generates (`elabDocumentedDeclaration`).
+
+Without this, a doc comment in front of a Veil command is taken by Lean's
+own `declaration` parser, which then expects `def`, `theorem`, …. The inner
+command is any `command`, so it keeps its own parser and error messages;
+the low priority makes every Lean command that takes a doc comment itself
+(`def`, `structure`, `#guard_msgs`, …) win the tie, and the elaborator
+rejects inner commands that are not Veil declarations. -/
+scoped syntax (name := documentedDeclaration) (priority := low)
+  Lean.Parser.Command.docComment command : command
+
 /-- Assemble the specification. -/
 scoped syntax (name := genSpec) kw_gen_spec : command
 
