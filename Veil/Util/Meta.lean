@@ -267,6 +267,18 @@ def addVeilDeclarationRanges [Monad m] [MonadEnv m] [MonadFileMap m] [MonadLiftT
   if (← findDeclarationRanges? declName).isSome then return
   addDeclarationRangesFromSyntax declName ref (veilDeclSelectionRef ref)
 
+/-- Mark `nameStx`, the identifier with which a user command declares
+`declName`, as `declName`'s definition site: a binder `TermInfo` for the
+constant on that identifier. Together with a selection range equal to the
+identifier's (`addVeilDeclarationRanges`), this is what hover and
+find-references at the declaration, and SubVerso's definition detection
+(Verso's per-declaration anchors), look for. `addDecl`-based declarations get
+neither from Lean. Does nothing for a non-identifier or an absent constant. -/
+def addVeilDefinitionSiteInfo (nameStx : Syntax) (declName : Name) : CommandElabM Unit := do
+  unless nameStx.isIdent && (← getEnv).contains declName do return
+  liftTermElabM do
+    Term.addTermInfo' nameStx (← mkConstWithLevelParams declName) (isBinder := true)
+
 /-- `addVeilDeclarationRanges` for the constructor and the projections of
 the generated structure (or class) `structName`: a structure elaborated from
 position-less identifiers records its own range but none for these. -/
