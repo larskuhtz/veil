@@ -356,6 +356,18 @@ deriving Inhabited
 
 def DerivedDefinition.declarationKind (dd : DerivedDefinition) : DeclarationKind := .derivedDefinition dd.kind dd.derivedFrom
 
+/-- A doc comment written in front of a Veil declaration whose constant does
+not exist yet: state components and parameters become fields of structures
+that are generated with the state. -/
+structure PendingDoc where
+  /-- The Veil name the doc comment documents. -/
+  name : Name
+  /-- The constants that can carry the docstring, in order of preference;
+  the first one that exists gets it. -/
+  candidates : Array Name
+  doc : TSyntax ``Lean.Parser.Command.docComment
+deriving Inhabited
+
 structure Module where
   /-- The name of the module -/
   name : Name
@@ -408,6 +420,10 @@ structure Module where
   canonical name and type across declarations. See
   `Module.canonicalizeExtraParams`. -/
   protected _extraParamRegistry : ExtraParamRegistry := {}
+
+  /-- Implementation detail. Doc comments on declarations whose constant is
+  generated later, with the state (see `PendingDoc`). -/
+  protected _pendingDocs : Array PendingDoc := #[]
 deriving Inhabited
 
 def Module.defaultAssertionSet (mod : Module) : Name := mod.name

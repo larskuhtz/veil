@@ -24,6 +24,10 @@ Every Veil module follows a canonical structure with the following components:
 9. Properties (safety, invariants, assumptions)
 10. Specification generation & verification commands
 
+Every declaration among them — sorts, parameters, instantiated classes, state
+components, ghost relations, the initializer, procedures, actions, transitions
+and properties — can carry a doc comment (§11).
+
 ### 1. Module Declaration
 
 A Veil module begins with `veil module <Name>` and ends with `end <Name>`:
@@ -433,3 +437,36 @@ unsat trace {
 ```
 
 Note that checking time grows exponentially with the trace length.
+
+### 11. Doc Comments on Declarations
+
+Any Veil command that declares something can be preceded by a doc comment,
+as a Lean declaration can:
+
+```lean
+/-- No two nodes are leader at the same time. -/
+safety [single_leader] leader N ∧ leader M → N = M
+
+/-- The node currently holding the token. -/
+individual holder : node
+```
+
+The declaration elaborates exactly as it does without the comment, and the
+comment becomes the docstring of the constant the declaration generates, which
+is what hover and documentation tools show for that constant:
+
+* an `action`, `procedure`, `transition`, ghost `relation`/`function`, or a
+  named `safety`/`invariant`/`assumption`: the constant of
+  that name (`Mod.<name>`); an unnamed assertion's generated name
+  (`Mod.safety_0`, …); `after_init`: `Mod.initializer`;
+* a mutable state component: its field of the generated state, `Mod.State.<f>`;
+  an `immutable` one: `Mod.Theory.<f>`;
+* a `type`, `enum`, `param` or `instantiate`: `Mod.Instantiation.<n>`.
+
+State components and parameters are fields of structures generated with the
+state (`#gen_state`, or implicitly by the first action or assertion), so their
+docstrings arrive then. Derived constants (`Mod.<action>.do`, …) carry none.
+
+A doc comment in front of a command that declares nothing (`#gen_spec`,
+`set_option … in`, …) is an error; write `set_option … in` first and the doc
+comment after it. `VeilTest/DocComments.lean` covers every case.
