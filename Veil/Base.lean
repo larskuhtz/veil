@@ -157,6 +157,18 @@ register_option veil.experimental.wpCompact : Bool := {
   descr := "Experimental. If true, compact generated `wp_local_eq.pred` definitions by sharing duplicated postcondition branches with `letEq` and exposing abstract-state conditionals field-wise."
 }
 
+register_option veil.lazyWitnessRegen : Bool := {
+  defValue := true
+  descr := "If true (default), drop the proof witness Expr from \
+  `DischargerResult.proven` after a discharger succeeds and re-elaborate it \
+  on demand at `#gen_theorems` time. Trades one-time regeneration cost for \
+  bounded steady-state heap during `#check_invariants` (large protocols that \
+  previously OOM'd can complete). Set to false to retain witnesses eagerly \
+  (the pre-2026-06-10 behavior); useful for debugging regen behavior or when \
+  `#gen_theorems` is called repeatedly on the same VCs and the per-call regen \
+  cost dominates the memory savings."
+}
+
 register_option veil.simulate.numTraces : Nat := {
   defValue := 10000
   descr := "Number of simulation traces to attempt, stopping early on a violation or cancellation. Default is 10000."
