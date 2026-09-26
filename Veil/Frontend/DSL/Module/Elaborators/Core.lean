@@ -464,6 +464,8 @@ def elabStepProperty : CommandElab := fun stx => do
   withTraceNode (`veil.perf.elaborator.assertion ++ assertion.name) (fun _ => return s!"step_property {assertion.name}") do
     let mod' ← mod.defineAssertion assertion
     localEnv.modifyModule (fun _ => mod')
+    unless stx[1].isNone do
+      addVeilDefinitionSiteInfo stx[1][0][1] ((← getCurrNamespace) ++ assertion.name)
 
 open Lean Meta Elab Command Veil in
 /-- Developer tool. Import all module parameters into section scope. -/
