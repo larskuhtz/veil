@@ -9,6 +9,7 @@ public meta import Veil.Frontend.DSL.Infra.Preprocessing
 public meta import Veil.Frontend.DSL.Infra.Quantifiers
 public meta import Veil.Util.ReplacingInstances
 public meta import Veil.Util.UnhygienicCasesM
+public meta import Veil.Frontend.DSL.Infra.SolverHypotheses
 
 public meta section
 
@@ -433,6 +434,49 @@ where
       | _ => pure false
     return isStateχ || ofBadType
 
+/-- For every hypothesis whose type head is one of `structNames`, the names
+its `veil_smt_ignore` field hypotheses will carry after `cases` (see
+`withheldFieldHypNames`). -/
+def veilWithheldFieldHypNames (structNames : Array Name) : DesugarTacticM (Array Name) :=
+  veilWithMainContext do
+    let env ← getEnv
+    let mut names := #[]
+    for hyp in (← getLCtx) do
+      if hyp.isImplementationDetail then continue
+      let some sn := hyp.type.getAppFn'.constName? | continue
+      unless structNames.contains sn do continue
+      names := names ++ withheldFieldHypNames env hyp.userName sn
+    return names
+
+/-- Withhold the hypotheses named in `names` — the field hypotheses of
+classes' `veil_smt_ignore` fields, right after the destructuring that
+produced them — from the solver, by marking them implementation details of
+the local context. Veil's hint collection for the solver
+(`getPropsInContext`), `at *` simplification, `expose_names` and the
+destructuring passes all skip such hypotheses, so the field never reaches
+the SMT query. Marking rather than `clear`ing: `cases` leaves the
+destructed instance as a constructor application inside every hypothesis
+that mentioned it (a sibling field of a class that `extends` the destructed
+parent reads `C.f ⟨…, h, …⟩ …`), so those hypotheses depend on each field
+and `clear` refuses. Names are looked up directly, so an instance
+introduced hygienically (macro-scoped names) is found too; an absent name
+is skipped. -/
+def hideWithheldFieldHyps (names : Array Name) : DesugarTacticM Unit := do
+  if names.isEmpty then return
+  veilWithMainContext do
+    let g ← getMainGoal
+    let mut lctx ← getLCtx
+    let mut changed := false
+    for n in names do
+      if let some ld := lctx.findFromUserName? n then
+        lctx := lctx.setKind ld.fvarId .implDetail
+        changed := true
+    if changed then
+      let g' ← mkFreshExprMVarAt lctx (← getLocalInstances) (← g.getType)
+        .syntheticOpaque (← g.getTag)
+      g.assign g'
+      replaceMainGoal [g'.mvarId!]
+
 mutual
 
 /-- Destruct a structure into its fields. If `onlyStructs` is non-empty, only destructs
@@ -459,6 +503,9 @@ partial def elabVeilDestructSpecificHyp (ids : Array (TSyntax `ident)) (onlyStru
     -- by the recursive pass like any other structure-typed hypothesis.
     let s ← `(rcasesPat| @⟨ $[$newFieldNames],* ⟩)
     veilEvalTactic $ ← `(tactic| unhygienic rcases $(mkIdent ld.userName):ident with $s)
+    -- Fields withheld from the solver (`veil_smt_ignore`) are hidden right
+    -- after the destructuring, so they never reach the hypothesis set.
+    hideWithheldFieldHyps (withheldFieldHypNames (← getEnv) name sn)
     -- Simplify FieldAbstractType in new field hypotheses
     -- This handles types like `FieldAbstractType node State.Label.leader`
     let dsimpLemmas := #[fieldAbstractDispatcher, fieldLabelToDomain sn, fieldLabelToCodomain sn]
@@ -543,8 +590,12 @@ def elabVeilDestruct' : DesugarTacticM Unit := veilWithMainContext do
     let targets ← veilDestructTargets
     if targets.all seen.contains then break
     seen := seen ++ targets
+    -- The field hypotheses this pass will produce for fields withheld from
+    -- the solver (`veil_smt_ignore`), by the names `cases` gives them.
+    let withheld ← veilWithheldFieldHypNames targets
     let targetIdents := targets.map mkIdent
     veilEvalTactic $ ← `(tactic| try veil_cases_type* $[$targetIdents:ident]*)
+    hideWithheldFieldHyps withheld
   veilEvalTactic $ ← `(tactic| expose_names)
 
 inductive GenericStateKind

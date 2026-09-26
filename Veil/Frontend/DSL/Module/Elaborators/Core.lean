@@ -5,6 +5,7 @@ public meta import Lean.Meta.Tactic.TryThis
 public meta import Veil.Base
 public meta import Veil.Frontend.DSL.Module.Syntax
 public meta import Veil.Frontend.DSL.Infra.EnvExtensions
+public meta import Veil.Frontend.DSL.Infra.SolverHypotheses
 public meta import Veil.Frontend.DSL.Module.Util
 public meta import Veil.Frontend.DSL.Action.Elaborators
 public meta import Veil.Frontend.DSL.State.SubState
