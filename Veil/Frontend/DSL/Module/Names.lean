@@ -154,6 +154,38 @@ def exception : Ident := mkIdent exceptionName
 def actionTagEnumInstName : Name := mkVeilImplementationDetailName `tag
 def actionTagEnumInst : Ident := mkIdent actionTagEnumInstName
 
+/-! Generated step lemmas (`veil.gen.stepLemmas`), derived at `#gen_spec` from
+the pre-computed transitions. All relative to the module namespace. -/
+
+/-- `<action>.tr_of_step`: from the transition system's step by the action, the
+action's pre-computed transition body at the canonical instantiation. -/
+def stepExposureLemmaName (action : Name) : Name := action ++ `tr_of_step
+/-- `<action>.frame`: the conjunction of the action's frame facts, one destructuring
+proof per action; the per-field `<action>.frame_<f>` lemmas are its projections. -/
+def stepFrameBundleName (action : Name) : Name := action ++ `frame
+/-- `<action>.frame_<f>`: the action leaves the state component `f` unchanged. -/
+def stepFrameLemmaName (action field : Name) : Name :=
+  action ++ Name.mkSimple s!"frame_{field}"
+/-- `<action>.mono_<f>`: the action only ever sets the `Bool`-valued `f` to `true`. -/
+def stepMonoLemmaName (action field : Name) : Name :=
+  action ++ Name.mkSimple s!"mono_{field}"
+/-- `<f>.mono`: over every label, `f` is only ever set to `true`. -/
+def fieldMonoLemmaName (field : Name) : Name := field ++ `mono
+/-- `<f>.init`: in every initial state, `f` is a fixed closed literal. -/
+def fieldInitLemmaName (field : Name) : Name := field ++ `init
+
+/-! Step properties (`step_property`): the whole-system exports emitted by
+`#gen_theorems` / `#gen_composition` into the current namespace. -/
+
+/-- `<property>_step`: the step property over every label, from the
+assumptions and the invariants at the pre-state. -/
+def stepPropertyLemmaName (ns property : Name) : Name :=
+  ns ++ Name.mkSimple s!"{property}_step"
+/-- `reachable_<property>_step`: the step property along every step from a
+reachable state. -/
+def reachableStepLemmaName (ns property : Name) : Name :=
+  ns ++ Name.mkSimple s!"reachable_{property}_step"
+
 def transitionWeakeningLemmaName : Name := `_transitionWeakeningLemma
 def transitionWeakeningLemma : Ident := mkIdent transitionWeakeningLemmaName
 

@@ -65,6 +65,7 @@ scoped syntax (name := kw_invariant) "invariant" : veilKeyword
 scoped syntax (name := kw_safety) "safety" : veilKeyword
 scoped syntax (name := kw_termination) "termination" : veilKeyword
 scoped syntax (name := kw_state_constraint) "state_constraint" : veilKeyword
+scoped syntax (name := kw_step_property) "step_property" : veilKeyword
 
 scoped syntax (name := kw_gen_spec) "#gen_spec" : veilKeyword
 scoped syntax (name := kw_gen_theorems) "#gen_theorems" : veilKeyword
@@ -302,14 +303,129 @@ scoped syntax (name := stateConstraintKind) kw_state_constraint : propertyKind
 /-- An assertion. -/
 scoped syntax (name := assertionDeclaration) propertyKind (propertyName)? term : command
 
+/-- A `step_property` is a two-state property, stated over a pre-state and a
+post-state with the primed-component notation of `transition` bodies (`f` is
+the pre-state component, `f'` the post-state one; capitalised variables are
+universally quantified, as in `invariant`):
+
+```lean
+step_property [opened_mono] { opened I S → opened' I S }
+```
+
+It is checked once per action — under the module's assumptions and its
+invariants at the pre-state, exactly as an invariant-preservation cell — and
+appears in the verification-condition grid, the persistent VC registry and
+`#veil_status` like any other cell. Step properties are conclusions only:
+no cell assumes another step property. `#gen_theorems` and
+`#gen_composition` additionally emit `<property>_step`, the property over
+every label of the transition system, and `#gen_composition` emits
+`reachable_<property>_step`, the property along every step from a reachable
+state. -/
+scoped syntax (name := stepPropertyDeclaration) kw_step_property (propertyName)? "{" term "}" : command
+
 /-- Assemble the specification. -/
 scoped syntax (name := genSpec) kw_gen_spec : command
 
+/-- `#gen_theorems`: persist the module's proven verification conditions as
+theorems in the current namespace (one `<action>_<property>` theorem per
+cell), then emit the per-action preservation lemmas `init_case` /
+`step_<action>` that `#gen_composition` composes into
+`invariants_of_reachable`. The lemma emission is best-effort and reported in
+one info message; the persisted theorems do not depend on it. -/
 scoped syntax (name := genTheorems) kw_gen_theorems : command
 
 scoped syntax (name := checkInvariants) "#check_invariants" : command
 
 scoped syntax (name := checkAction) "#check_action" ident : command
+
+/-! Cross-file check/prove commands. They work in any file that imports a
+module compiled with `veil.gen.vcRegistry`: the module's VCs are re-created
+from the persisted registry (statements read as the persisted `Expr`s — no
+re-generation, no drift) and discharged in *this* file, whose solver
+options apply. -/
+
+/-- `#check_invariants <Module>`: check all of the imported module's
+invariant VCs cross-file. -/
+scoped syntax (name := checkInvariantsOf) "#check_invariants" ident : command
+
+/-- `#check_action <Module> <action>`: check one action of the imported
+module (all properties + doesNotThrow) cross-file. -/
+scoped syntax (name := checkActionOf) "#check_action" ident ident : command
+
+/-- `#check_vc <Module> <action> <property>`: check a single cell of the
+imported module cross-file. -/
+scoped syntax (name := checkVCOf) "#check_vc" ident ident ident : command
+
+/-- `#prove_action <Module> <action>`: cross-file, check all VCs of one
+action of the imported module and persist every successful proof as a
+theorem `<current namespace>.<vc name>`. Fails if any VC is not proven.
+Run with `set_option veil.smt.trust false` to persist kernel-checked
+reconstructions (real proofs, no `sorryAx`). Cells whose canonical
+theorem already exists in the current namespace (e.g. from a preceding
+`#prove_vc … by …`) are consumed as-is after a statement check, not
+re-solved. -/
+scoped syntax (name := proveAction) "#prove_action" ident ident : command
+
+/-- `#prove_vc <Module> <action> <property> (by <tac>)?`: cross-file,
+prove a single cell of the imported module — synchronously, on the
+command thread — and persist it as `<current namespace>.<vc name>`. The
+statement is the persisted registry statement (primary form). With no
+`by`, the cell's default discharge tactic is used; with `by <tac>`, the
+given tactic — this is the manual-cell override (quorum-intersection
+chains etc. that the SMT pipeline cannot find), the cross-file successor
+of the in-file `@[veil]` theorem workflow. Rejects proofs containing
+`sorry` or metavariables. -/
+scoped syntax (name := proveVC) "#prove_vc" ident ident ident (" by " tacticSeq)? : command
+
+/-- `#gen_composition <Module>`: emit, into the current namespace, the
+composition of the module's per-action preservation lemmas (the
+`step_<action>`/`init_case` lemmas `#prove_action` emits in the per-action
+proof files, which must be imported — or `#gen_theorems` emits inside the
+module, in which case run this in the module's namespace):
+`invariants_of_reachable` — every
+reachable state of the generated `relationalTransitionSystem` satisfies
+the assembled `Invariants` conjunction — plus one named
+`reachable_<property>` projection per invariant, in declaration order.
+Everything is `addDecl`ed (kernel-checked); no solver runs. -/
+scoped syntax (name := genComposition) "#gen_composition" ident : command
+
+/-- `#gen_proof_files <Module>`: scaffold the verified-module file family
+next to the module's defining source file — one
+`<Model>/Proofs/<Action>.lean` per action (`#prove_action`, with manual
+cells added by hand as `#prove_vc` lines) and `<Model>/Certify.lean`
+(`#gen_composition`). Existing files are never overwritten. -/
+scoped syntax (name := genProofFiles) "#gen_proof_files" ident : command
+
+/-- `#veil_status <Module> (table)?`: the audit command — answers "which of
+the module's VCs are proven *in the current import closure*, by what, and
+on which axioms" from the persisted VC registry plus an environment walk.
+No solver runs and nothing is added to the environment.
+
+Per registry cell (one (action, property) obligation; its WP and TR
+encodings are the same cell), the walk resolves the canonical theorem
+names (`<ns>.<action>_<property>`, `_tr` fallback; namespaces as in the
+file family and `#gen_theorems` layouts) and classifies:
+
+* `real` — a statement-matching, kernel-checked theorem is in scope
+  (`(defeq)` marks a definitional rather than bit-identical statement
+  match: manual cells elaborate hand-written statement syntax);
+* `sorry-stubbed` — the theorem's axiom closure contains `sorryAx`
+  (a statement-only stub, no verification claim);
+* `statement-drift` — a constant with the canonical name exists but does
+  not state the registry statement (it cannot stand in for the VC);
+* `axiom-stand-in` — the canonical name is an `axiom`/`opaque`, not a
+  kernel-checked proof;
+* `registry-only` — no constant with any canonical name is in scope.
+
+Output: one `#guard_msgs`-pinnable summary line
+(`#veil_status <Module>: N/M real; axioms: …` — the axiom union over every
+theorem standing in for a VC), plus, when any cell is not `real`, a
+greppable table of those cells as a warning. The `table` variant prints
+the full per-cell table (status, theorem, defining Lean module, exact
+per-theorem axiom set) — per-theorem axiom sets re-walk the closure per
+cell, so expect minutes at thousands-of-VCs scale (the default summary
+does one shared walk and stays cheap). -/
+scoped syntax (name := veilStatus) "#veil_status" ident (ident)? : command
 
 /-- Run the explicit state model checker on the current module with the given
 type instantiation and theory. The optional `maxDepth` parameter limits how

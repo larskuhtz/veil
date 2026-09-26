@@ -450,3 +450,54 @@ unsat trace {
 ```
 
 Note that checking time grows exponentially with the trace length.
+
+#### Generated Step Lemmas
+
+`#gen_spec` also derives, from every imperative action's pre-computed
+transition `<action>.ext.tr`, a family of kernel-checked two-state lemmas
+about single state components (option `veil.gen.stepLemmas`, default on;
+nothing is assumed, and a component whose updates are not of the recognised
+shape simply gets no lemma):
+
+| Lemma | Statement | When |
+|---|---|---|
+| `<action>.frame_<f>` | `(RTS).tr th s (.<action> args) s' → s'.f = s.f` | every branch of the action leaves `f` unchanged |
+| `<action>.frame` | `(RTS).tr th s (.<action> args) s' → s'.f₁ = s.f₁ ∧ … ∧ s'.fₖ = s.fₖ` | the conjunction over all framed components (the per-field lemmas project it) |
+| `<action>.mono_<f>` | `(RTS).tr th s (.<action> args) s' → ∀ x…, s.f x… = true → s'.f x… = true` | every branch leaves the `Bool`-valued `f` unchanged or sets it to `true` |
+| `<f>.mono` | `(RTS).tr th s l s' → ∀ x…, s.f x… = true → s'.f x… = true` | every action has one of the two above, at least one `mono` |
+| `<f>.init` | `(RTS).init th s → ∀ x…, s.f x… = v` | the initializer sets `f` everywhere to the literal `v` |
+| `<action>.tr_of_step` | `(RTS).tr th s (.<action> args) s' → ⟨the body of <action>.ext.tr at th s s'⟩` | always (imperative actions); the exposed transition body every lemma above starts from |
+
+Here `RTS` is the module's `relationalTransitionSystem`, and the lemmas are
+stated at the instantiation it fixes (`Theory`, `State (FieldAbstractType …)`);
+the transition hypothesis is the only explicit argument, so a consumer writes
+`M.send.frame_leader h` or `M.pending.mono h x y hx`. Not derived: `false` or
+computed writes, values chosen by `pick`, actions written in `transition`
+syntax (which also block the whole-system `<f>.mono`). Emission is silent;
+`set_option trace.veil.stepLemmas true` prints the per-component verdicts.
+
+#### Step Properties
+
+A `step_property` is a two-state property: a proposition over a pre-state and
+a post-state, with the primed-component notation of `transition` bodies (`f`
+is the pre-state component, `f'` the post-state one; capitalised variables
+are universally quantified, as in `invariant`; only mutable components have a
+primed form):
+
+```lean
+step_property [pending_mono] { pending N M → pending' N M }
+step_property [committed_frozen] { committed N → entry' N V = entry N V }
+```
+
+It is checked once per action, under the module's assumptions and its
+invariants at the pre-state — an action property, strictly more than an
+invariant (which speaks about the post-state alone) and strictly less than
+general safety: a property relating non-adjacent states needs history state.
+Step properties are conclusions only; no cell assumes another step property.
+The cells appear in `#check_invariants` (under their action), in the
+persistent VC registry and `#veil_status`, and `#gen_theorems` persists them
+as `<action>_<property>`. `#gen_theorems` and `#gen_composition` also emit
+`<property>_step` — the property over every label, from the assumptions and
+the invariants at the pre-state — and `#gen_composition` emits
+`reachable_<property>_step`, the property along every step from a reachable
+state. These are what a downstream contract consumes.

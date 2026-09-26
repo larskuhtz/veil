@@ -6,15 +6,18 @@ public meta import Veil.Base
 public meta import Veil.Frontend.DSL.Module.Syntax
 public meta import Veil.Frontend.DSL.Infra.EnvExtensions
 public meta import Veil.Frontend.DSL.Module.Util
+public meta import Veil.Frontend.DSL.Module.StepLemmas
 public meta import Veil.Frontend.DSL.Action.Elaborators
 public meta import Veil.Frontend.DSL.State.SubState
 public meta import Veil.Frontend.DSL.State.ConcreteRegistry
+public meta import Veil.Frontend.DSL.Module.Composition
 public meta import Veil.Core.UI.Trace.TraceDisplay
 public meta import Veil.Core.Tools.ModelChecker.Concrete.Checker
 public meta import Veil.Core.Tools.ModelChecker.Simulation
 public meta import Veil.Frontend.DSL.Action.Extract
 public meta import Veil.Frontend.DSL.Module.Util.Enumeration
 public meta import Veil.Util.Multiprocessing
+public meta import Veil.Util.ProofCache
 public meta import Veil.Frontend.DSL.Module.AssertionInfo
 
 public meta section
@@ -193,6 +196,7 @@ def elabEnumDeclaration : CommandElab := fun stx => do
     -- Declare an axiomatisation class for the enum type
     let (class_name, class_decl) ← mkEnumAxiomatisation id elems
     elabVeilCommand class_decl
+    addVeilStructureRanges ((← getCurrNamespace) ++ class_name.getId) stx
     -- Declare the concrete type and show it satisfies the axiomatisation
     for cmd in (← mkEnumConcreteType id elems) do
       elabVeilCommand cmd
@@ -234,35 +238,59 @@ private def generateIgnoreFn (mod : Module) : CommandElabM Unit := do
 
 
 /-- Crystallizes the state of the module, i.e. it defines it as a Lean
-`structure` definition, if that hasn't already happened. -/
+`structure` definition, if that hasn't already happened.
+
+State generation on a large module (~50 components) needs a raised
+heartbeat budget in one `isDefEq` inside the machinery, and a file-level
+`set_option maxHeartbeats` demonstrably does not reach that site
+— while the module-default option block does.
+The raise therefore lives here, scoped to state generation (`max`, never
+lowering a user raise), so the rest of the module — in particular the
+sweep dischargers, which capture options at `#gen_spec` — elaborates under
+the plain `veilDefaultOptions` budget. -/
 def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := do
   if mod.isStateDefined then
     return mod
-  -- Resolve concrete representation configurations
-  let repConfigs ← resolveConcreteRepConfigs mod._concreteRepConfig
-  let (mod, fieldStxs) ← mod.declareStateFieldLabelTypeAndDispatchers repConfigs
-  let (mod, stateStxs) ← mod.declareFieldsAbstractedStateStructure repConfigs
-  let stateStxs := fieldStxs ++ stateStxs
-  let (mod, theoryStxs) ← mod.declareTheoryStructure
-  let instantiationStxs ← mod.mkInstantiationStructure
-  for stx in stateStxs ++ theoryStxs ++ instantiationStxs do
-    elabVeilCommand stx
-  generateIgnoreFn mod
-  let mod := { mod with _stateDefined := true }
-  if mod._useLocalRPropTC then
-    let stxs ← liftTermElabM mod.declareLocalTheoryPropTC
-    for stx in stxs do
-      elabVeilCommand stx.raw
-    let stxs ← liftTermElabM mod.declareLocalRPropTC
-    for stx in stxs do
-      elabVeilCommand stx.raw
-    -- Generate the transition weakening theorem for this module
-    try
-      let cmd ← liftTermElabM mod.declareTransitionWeakeningLemma
-      elabVeilCommand cmd
-    catch ex =>
-      logWarning m!"unable to generate transition weakening lemma: {ex.toMessageData}"
-  pure mod
+  Command.withScope (fun sc =>
+      { sc with opts := maxHeartbeats.set sc.opts (max 1000000 (maxHeartbeats.get sc.opts)) }) do
+    -- Resolve concrete representation configurations
+    let repConfigs ← resolveConcreteRepConfigs mod._concreteRepConfig
+    let (mod, fieldStxs) ← mod.declareStateFieldLabelTypeAndDispatchers repConfigs
+    let (mod, stateStxs) ← mod.declareFieldsAbstractedStateStructure repConfigs
+    let stateStxs := fieldStxs ++ stateStxs
+    let (mod, theoryStxs) ← mod.declareTheoryStructure
+    let instantiationStxs ← mod.mkInstantiationStructure
+    for stx in stateStxs ++ theoryStxs ++ instantiationStxs do
+      elabVeilCommand stx
+    generateIgnoreFn mod
+    -- The generated structures' fields are built from position-less
+    -- identifiers; attribute each to the user declaration it comes from.
+    let ns ← getCurrNamespace
+    for sc in mod.mutableComponents do
+      addVeilDeclarationRanges (ns ++ stateName ++ sc.name) sc.userSyntax
+      addVeilDefinitionSiteInfo (veilDeclSelectionRef sc.userSyntax) (ns ++ stateName ++ sc.name)
+    for p in mod.parameters do
+      if p.kind matches .sort _ | .userParameter then
+        addVeilDeclarationRanges (ns ++ instantiationTypeName ++ p.name) p.userSyntax
+    let mod := { mod with _stateDefined := true }
+    if mod._useLocalRPropTC then
+      let stxs ← liftTermElabM mod.declareLocalTheoryPropTC
+      for stx in stxs do
+        elabVeilCommand stx.raw
+      let stxs ← liftTermElabM mod.declareLocalRPropTC
+      for stx in stxs do
+        elabVeilCommand stx.raw
+      -- Generate the transition weakening theorem for this module
+      try
+        let cmd ← liftTermElabM mod.declareTransitionWeakeningLemma
+        elabVeilCommand cmd
+      catch ex =>
+        logWarning m!"unable to generate transition weakening lemma: {ex.toMessageData}"
+    -- The structures' constructors and the typeclasses' members are not
+    -- covered by the attribution above: they belong to this command.
+    for s in [stateName, theoryName, instantiationTypeName, localRPropTCName, localTheoryPropTCName] do
+      addVeilStructureRanges (ns ++ s) (← getRef)
+    pure mod
 
 private def Module.ensureExecutableModelCheckerDefinitions (mod : Module) : CommandElabM Unit := do
   if (← getEnv).contains (mod.name ++ enumerableTransitionSystemName) then
@@ -310,6 +338,7 @@ def elabProcedure : CommandElab := fun stx => do
     | `(command|procedure $nm:ident $br:explicitBinders ? {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.procedure nm.getId) br .none l stx
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
+    addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
 
 @[command_elab Veil.transitionDefinition]
 def elabTransition : CommandElab := fun stx => do
@@ -346,6 +375,7 @@ def elabTransition : CommandElab := fun stx => do
       -- Command.liftTermElabM $ warnIfNotFirstOrder nm.getId
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
+    addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
 
 @[command_elab Veil.procedureDefinitionWithSpec]
 def elabProcedureWithSpec : CommandElab := fun stx => do
@@ -360,6 +390,7 @@ def elabProcedureWithSpec : CommandElab := fun stx => do
     | `(command|procedure $nm:ident $br:explicitBinders ? $spec:doSeq {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.procedure nm.getId) br spec l stx
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
+    addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
 
 @[command_elab Veil.ghostRelationDefinition, command_elab Veil.ghostFunctionDefinition]
 def elabGhostDefinition : CommandElab := fun stx => do
@@ -376,6 +407,7 @@ def elabGhostDefinition : CommandElab := fun stx => do
       mod.defineGhostDefinition nm.getId br t (justTheory := forTheory.isSome) (isRelation := false) (retType := retTy)
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
+    addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
 
 @[command_elab Veil.assertionDeclaration]
 def elabAssertion : CommandElab := fun stx => do
@@ -399,11 +431,41 @@ def elabAssertion : CommandElab := fun stx => do
     | .trustedInvariant => "trusted_invariant"
     | .termination => "termination"
     | .stateConstraint => "state_constraint"
+    | .stepProperty => "step_property"
   withTraceNode (`veil.perf.elaborator.assertion ++ assertion.name) (fun _ => return s!"{kindStr} {assertion.name}") do
     -- Elaborate the assertion in the Lean environment
     let mod' ← mod.defineAssertion assertion
   --   dbg_trace s!"Elaborated assertion: {← liftTermElabM <|Lean.PrettyPrinter.formatTactic stx}"
     localEnv.modifyModule (fun _ => mod')
+    unless stx[1].isNone do
+      addVeilDefinitionSiteInfo stx[1][0][1] ((← getCurrNamespace) ++ assertion.name)
+
+/-- A `step_property` body may prime any mutable component (`f'` is its
+post-state value). An immutable component has no post-state: say so at the
+identifier, before the theory/state elaboration fails on an unbound name. -/
+private def throwIfStepPropertyPrimesImmutable (mod : Module) (prop : Term) : CommandElabM Unit := do
+  for comp in mod.immutableComponents do
+    let primed := comp.name.appendAfter "'"
+    if let some bad := prop.raw.find? fun s => s.isIdent && s.getId == primed then
+      throwErrorAt bad "`{primed}`: `{comp.name}` is an immutable state component, so it has \
+        no post-state value. Write `{comp.name}`; only mutable components have a primed form \
+        in a `step_property`."
+
+@[command_elab Veil.stepPropertyDeclaration]
+def elabStepProperty : CommandElab := fun stx => do
+  let mut mod ← getCurrentModule (errMsg := "You cannot declare a step property outside of a Veil module!")
+  mod ← mod.ensureStateIsDefined
+  mod.throwIfSpecAlreadyFinalized
+  let assertion : StateAssertion ← match stx with
+  | `(command|step_property $name:propertyName ? { $prop:term }) => do
+    throwIfStepPropertyPrimesImmutable mod prop
+    mod.mkAssertion .stepProperty name prop stx
+  | _ => throwUnsupportedSyntax
+  withTraceNode (`veil.perf.elaborator.assertion ++ assertion.name) (fun _ => return s!"step_property {assertion.name}") do
+    let mod' ← mod.defineAssertion assertion
+    localEnv.modifyModule (fun _ => mod')
+    unless stx[1].isNone do
+      addVeilDefinitionSiteInfo stx[1][0][1] ((← getCurrNamespace) ++ assertion.name)
 
 open Lean Meta Elab Command Veil in
 /-- Developer tool. Import all module parameters into section scope. -/
@@ -625,6 +687,9 @@ private def getCompiledCommandId (cmdName : String) (stx : Syntax) : CommandElab
 def elabModelCheck : CommandElab := fun stx => do
   -- Use dynamic trace class name for detailed profiling
   withTraceNode `veil.perf.elaborator.modelCheck (fun _ => return "#model_check") do
+    if ← isNoVerifyMode then
+      logWarningAt stx m!"⏭ #model_check skipped (veil.noVerify)"
+      return
     -- stx[1] is the optional mode, stx[2] is instTerm, stx[3] is optional theory,
     -- stx[4] is config, stx[5] is optional `assumptions_hold_by`
     let mode := getModelCheckingMode stx[1]
@@ -1225,6 +1290,9 @@ private def elabSimulateWithHandoff (mod : Module) (stx : Syntax) (callExpr : Te
 @[command_elab Veil.simulate]
 def elabSimulate : CommandElab := fun stx => do
   withTraceNode `veil.perf.elaborator.simulate (fun _ => return "#simulate") do
+    if ← isNoVerifyMode then
+      logWarningAt stx m!"⏭ #simulate skipped (veil.noVerify)"
+      return
     let mode := getModelCheckingMode stx[1]
     let instTerm : Term := ⟨stx[2]⟩
     let theoryTermOpt : Option Term := if stx[3].isNone then none else some ⟨stx[3][0]⟩
