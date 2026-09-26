@@ -406,10 +406,20 @@ def elabProveAction : CommandElab := fun stx => do
     -- (e.g. persisted by a preceding `#prove_vc … by …` — the manual-cell
     -- workflow) are consumed as-is after a statement check, never re-solved.
     let ns ← getCurrNamespace
-    let env ← getEnv
     let some allEntries ← getVCRegistry? modName
       | throwError "no VC registry for module `{modName}` in scope \
           (modules with a registry: {(← vcRegistryModules).toList})"
+    -- Kernel replay (`veil.cache.kernelReplay`): cache hits at the
+    -- command level. A replayed cell is `addDecl`ed under its canonical
+    -- name — that `addDecl` IS the kernel check — and is then consumed by
+    -- the existing-theorem scan below, exactly like a manually `#prove_vc`d
+    -- cell; a miss or kernel rejection leaves the cell to the solve path.
+    for e in allEntries do
+      if e.action == actionName && e.kind == .primary
+          && !(← getEnv).contains (ns.append e.name) then
+        if let some ms ← liftCoreM <| ProofCache.replayPersist? (ns.append e.name) [] e.type then
+          logInfoAt stx m!"cell ({e.action}, {e.property}): ♻ kernel replay ({ms} ms)"
+    let env ← getEnv
     let preproven := allEntries.filter fun e =>
       e.action == actionName && e.kind == .primary && env.contains (ns.append e.name)
     for e in preproven do
@@ -468,8 +478,18 @@ def elabProveVC : CommandElab := fun stx => do
         let tacSeq : TSyntax ``Lean.Parser.Tactic.tacticSeq := ⟨stx[4][1]⟩
         `(by $tacSeq)
     let fullName := (← getCurrNamespace).append e.name
+    -- Kernel replay (`veil.cache.kernelReplay`): on a cache hit, persist the cached
+    -- term directly — that `addDecl` IS the kernel check; a miss or a
+    -- kernel rejection falls through to the tactic path below.
+    if let some ms ← liftCoreM <| ProofCache.replayPersist? fullName [] e.type then
+      logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} \
+        in {ms} ms (♻ kernel replay)"
+      return
     let t0 ← IO.monoMsNow
-    liftTermElabM <| Term.withDeclName fullName do
+    -- ♻ visibility: a hits-delta across this synchronous elaboration means
+    -- the proof came from the cache (`veil.cache.proofs`), not a solve.
+    let hits0 ← ProofCache.statsHits
+    let proof ← liftTermElabM <| Term.withDeclName fullName do
       let proof ← Term.elabTermEnsuringType term e.type
       Term.synthesizeSyntheticMVarsNoPostponing
       let proof ← instantiateMVars proof
@@ -480,8 +500,23 @@ def elabProveVC : CommandElab := fun stx => do
       addDecl (.thmDecl {
         name := fullName, levelParams := []
         «type» := e.type, value := proof })
+      return proof
     let t1 ← IO.monoMsNow
-    logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} in {t1 - t0} ms"
+    let wasHit := (← ProofCache.statsHits) > hits0
+    -- Populate the cache from the MANUAL-cell path. `withProofCache` (the only
+    -- other `store` call site) wraps `veil_solve_wp`/`_tr`/`_doesnotthrow`
+    -- only, so a project that discharges cells by hand — `#prove_vc … by
+    -- <tactic>`, e.g. a `grind`-based script — could read from the cache but
+    -- never write to it, and so never got a single hit.
+    --
+    -- Safe by construction: the proof is rejected above unless it is
+    -- sorry-free and metavariable-free, and `ProofCache.find?` independently
+    -- re-checks `!entry.proof.hasSorry` on the read side.
+    unless wasHit do
+      if veil.cache.proofs.get (← getOptions) then
+        let _ ← ProofCache.store (← getOptions) e.type proof (t1 - t0)
+    let cacheNote := if wasHit then " (proof ♻ from cache)" else ""
+    logInfoAt stx m!"proved cell ({actionName}, {propName}) as {fullName} in {t1 - t0} ms{cacheNote}"
 
 
 @[command_elab Veil.genTheorems]
