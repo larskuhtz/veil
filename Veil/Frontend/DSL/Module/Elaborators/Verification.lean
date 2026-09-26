@@ -143,8 +143,12 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
   -- Generate ActionTag type for symbolic model checking
   -- NOTE: ActionTag is query-local (not a module sort), but we generate the
   -- axiomatisation class and concrete type here for convenience
+  -- Gated on `veil.gen.modelCheckScaffolding` (see Veil/Base.lean): the
+  -- enum axiomatisation + `FinEncodableInjOnly` instances generated here are
+  -- O(n^k) in the number of actions and explode for protocols with ~30+
+  -- actions. Disabling leaves `#check_invariants` / `#check_action` supported.
   let actionNames := mod.actions.map (fun (a : ProcedureSpecification) => Lean.mkIdent a.name)
-  if !actionNames.isEmpty then
+  if !actionNames.isEmpty && (← isModelCheckScaffoldingEnabled) then
     let (className, classDecl) ← mkEnumAxiomatisation actionTagType actionNames
     elabVeilCommand classDecl
     addVeilStructureRanges ((← getCurrNamespace) ++ className.getId) stx
@@ -169,6 +173,15 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
     elabVeilCommand initCmd
     let (rtsCmd, mod) ← Module.assembleRelationalTransitionSystem mod
     elabVeilCommand rtsCmd
+    -- Optionally emit the per-action executable extraction (for per-label
+    -- execution / trace-conformance monitoring) WITHOUT the O(n^k)
+    -- label-enumeration scaffolding (`Enumeration`/`FinEncodableInjOnly`,
+    -- ActionTag, `EnumerableTransitionSystem`). Eager only when
+    -- `modelCheckScaffolding` is off; with it on, the `#model_check` path
+    -- (`ensureExecutableModelCheckerDefinitions`) already produces the same
+    -- extraction on demand (running it here too would redeclare it).
+    if (← isExecutableActionsEnabled) && !(← isModelCheckScaffoldingEnabled) then
+      Extract.runGenExtractCommand mod
     pure mod
   -- Frame / monotonicity / initial-value lemmas derived from the pre-computed
   -- transitions (`veil.gen.stepLemmas`; solver-free, kernel-checked, silent).
