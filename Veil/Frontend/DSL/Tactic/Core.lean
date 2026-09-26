@@ -689,6 +689,13 @@ def elabVeilConcretizeFieldsWp (fast : Bool) : DesugarTacticM Unit := veilWithMa
   let fields ← getFieldIdentsForStruct stateTypeName
   let mut tacs : Array (TSyntax `Lean.Parser.Tactic.tacticSeq) := #[]
   let localSimpTerms := #[fieldLabelToDomain stateName, fieldLabelToCodomain stateName]
+  -- Also unfold a concretized field's type `CanonicalField doms cod` to its
+  -- arrow `d₁ → … → cod` (`cod` when `doms = []`). `IteratedArrow` is a
+  -- recursive definition, so the default simp set does not reduce it (it did
+  -- while it was an `abbrev` over `List.foldr`); left folded, the SMT
+  -- translation rejects the field ("cannot translate Type", or a malformed
+  -- sort), and `smtSimp` does not turn a `Bool`-valued field into a predicate.
+  let generalizeSimpTerms := localSimpTerms ++ #[mkIdent ``IteratedArrow, mkIdent ``CanonicalField]
   if !fast then
     -- (1) do basic simplification using `LawfulFieldRepresentation`
     tacs := tacs.push <| ← `(tacticSeq| veil_simp +$(mkIdent `instances) only [$(mkIdent `fieldRepresentationSetSimpPre):ident])
@@ -706,7 +713,7 @@ def elabVeilConcretizeFieldsWp (fast : Bool) : DesugarTacticM Unit := veilWithMa
       let f : Ident := f
       let fDestructed := mkIdent <| Name.append st.getId f.getId -- Name.mkSimple s!"{st.getId}_{f.getId}"
       let tmpField := mkIdent <| mkVeilImplementationDetailName f.getId
-      tacs := tacs.push <| ← `(tacticSeq| generalize (($rep _).$(mkIdent `get)) $st.$f = $tmpField at * ; dsimp +$(mkIdent `instances) [$[$localSimpTerms:ident],*] at $tmpField:ident ; veil_rename_hyp $tmpField:ident => $fDestructed:ident)
+      tacs := tacs.push <| ← `(tacticSeq| generalize (($rep _).$(mkIdent `get)) $st.$f = $tmpField at * ; dsimp +$(mkIdent `instances) [$[$generalizeSimpTerms:ident],*] at $tmpField:ident ; veil_rename_hyp $tmpField:ident => $fDestructed:ident)
     -- Clear the original state hypothesis
     tacs := tacs.push <| ← `(tacticSeq| try clear $st:ident)
   for t in tacs do
@@ -753,6 +760,16 @@ def elabVeilConcretizeFieldsTr : DesugarTacticM Unit := veilWithMainContext do
 
   -- Step 2: Concretize fields using the standard procedure
   elabVeilConcretizeFieldsWp false
+
+  -- Step 2b: Step 2 unfolds `CanonicalField doms cod` in each concretized
+  -- field's *own* type only. A frame equality `st'.f = st.f` of a zero-arity
+  -- field keeps it as the implicit type of its `Eq`
+  -- (`@Eq (CanonicalField [] Bool) st'.f st.f`), and lean-smt's Bool
+  -- embedding matches that type syntactically (`boolEqSimproc`), so for a
+  -- `Bool` field the equation is left as `decide x = decide y` over
+  -- `Classical.propDecidable`, which the SMT translation cannot sort
+  -- ("Expected SMT-LIBv2 sort constructor"). Unfold it everywhere.
+  veilWithMainContext $ veilEvalTactic (← `(tactic| try dsimp only [$(mkIdent ``IteratedArrow):ident, $(mkIdent ``CanonicalField):ident] at *))
 
   -- Step 3: Final simplification
   -- NOTE: `Bool.decide_eq_bool_eq` is ONLY used here for now; it might be
