@@ -625,6 +625,9 @@ private def getCompiledCommandId (cmdName : String) (stx : Syntax) : CommandElab
 def elabModelCheck : CommandElab := fun stx => do
   -- Use dynamic trace class name for detailed profiling
   withTraceNode `veil.perf.elaborator.modelCheck (fun _ => return "#model_check") do
+    if ← isNoVerifyMode then
+      logWarningAt stx m!"⏭ #model_check skipped (veil.noVerify)"
+      return
     -- stx[1] is the optional mode, stx[2] is instTerm, stx[3] is optional theory,
     -- stx[4] is config, stx[5] is optional `assumptions_hold_by`
     let mode := getModelCheckingMode stx[1]
@@ -1225,6 +1228,9 @@ private def elabSimulateWithHandoff (mod : Module) (stx : Syntax) (callExpr : Te
 @[command_elab Veil.simulate]
 def elabSimulate : CommandElab := fun stx => do
   withTraceNode `veil.perf.elaborator.simulate (fun _ => return "#simulate") do
+    if ← isNoVerifyMode then
+      logWarningAt stx m!"⏭ #simulate skipped (veil.noVerify)"
+      return
     let mode := getModelCheckingMode stx[1]
     let instTerm : Term := ⟨stx[2]⟩
     let theoryTermOpt : Option Term := if stx[3].isNone then none else some ⟨stx[3][0]⟩

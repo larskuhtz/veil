@@ -166,21 +166,42 @@ def runManager (cancelTk? : Option IO.CancelToken := none) : CommandElabM Unit :
         dbg_trace "[VCManager] Error in manager loop: {msg}"
         managerLoopErrors.modify (·.push msg)
   ) cancelTk
+  -- Under `veil.noVerify` the loop would have nothing to do, and nothing that
+  -- could ever tell it so: no discharger runs, so nothing sends `.fill`, and
+  -- every check, trace, prove and model-check command returns before it
+  -- reaches the verifier. Starting it anyway parks a thread in `recv` for the
+  -- rest of the process.
+  --
+  -- That park is harmless under `lean`, which exits the process outright, and
+  -- fatal to anything that *embeds* the frontend and returns from `main`:
+  -- the runtime then finalizes the task manager, which joins every worker
+  -- thread and so waits on this one forever. Tools that re-elaborate a module
+  -- to recover its `InfoTree`s — documentation renderers, for instance — work
+  -- exactly that way, and hang on every Veil module without this.
+  -- The two halves are now separate, because the flag can no longer stand for
+  -- both. Resetting the state is per *file* and must happen whether or not
+  -- anything will be solved; starting the loop is per *process* and is what
+  -- `noVerify` makes pointless. Resetting on the first call too is a no-op in
+  -- effect — the manager is fresh from `initialize`, and every caller resets
+  -- before it registers anything.
+  let noVerify ← isNoVerifyMode
+  vcManager.atomically (fun managerRef => do
+    let mgr ← managerRef.get
+    -- Reap abandoned work before dropping the only references to it
+    cancelAbandonedWork mgr
+    let mgr ← VCManager.new vcManagerCh (currentManagerId := mgr._managerId)
+    managerRef.set mgr)
   vcServerStarted.atomically (fun ref => do
-    if !(← ref.get) then
+    unless (← ref.get) || noVerify do
       -- Start the manager task but DON'T register with logSnapshotTask.
       -- The manager loop is infinite, so registering it would hang the build.
       -- Discharger tasks are registered by runFilteredAsync/waitFilteredSync instead.
       -- dbg_trace "({← IO.monoMsNow}) [Manager] Starting manager loop"
       let _ ← (managerLoop ()).asTask
-    else
-      vcManager.atomically (fun managerRef => do
-        let mgr ← managerRef.get
-        -- Reap abandoned work before dropping the only references to it
-        cancelAbandonedWork mgr
-        let mgr ← VCManager.new vcManagerCh (currentManagerId := mgr._managerId)
-        managerRef.set mgr)
-    ref.set true
+      -- Claim the server is up only when it is: `veil.noVerify` is an option
+      -- as well as an environment variable, so one process may elaborate a
+      -- skipped file and then a verifying one.
+      ref.set true
   )
 
 /-- Demote error-severity diagnostics in a discharger's snapshot tree to

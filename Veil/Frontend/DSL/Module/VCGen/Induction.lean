@@ -28,13 +28,24 @@ namespace Veil
 
 /-! ## Induction-Specific Result Processing -/
 
-/-- Process SMT outputs and build counterexamples for inductive VCs. -/
+/-- Process SMT outputs and build counterexamples for inductive VCs.
+
+NOTE: must not `getCurrentModule` unconditionally — dischargers also run in
+files *importing* the module (the cross-file registry commands,
+`#check_action <Module> <action>` etc.), where there is no file-local module
+state. There the structured counterexample rendering (which needs the
+`Module`) is skipped and the raw model is kept. This function also must not
+throw on that path: it runs in the async discharger, downstream of the
+result `catch` — a throw here would silently kill the discharger task and
+hang every awaiter of its VC. -/
 private def overallSmtResult [Monad m] [MonadEnv m] [MonadError m] [MonadLiftT BaseIO m]
     [MonadLiftT MetaM m] (actName : Name) (outputs : Array SmtOutput) : m (Option SmtResult) := do
-  let mod ← getCurrentModule
+  let mod? := (← localEnv.get).currentModule
   buildSmtResult outputs (fun sat => do
     sat.filterMapM (fun ce => return ← ce.mapM (fun ce => do
       try
+        let some mod := mod?
+          | return .some { raw := ce, rawHtml := ← renderSmtModel ce, structuredJson := Json.null }
         let veilModel ← buildCounterexampleExprs ce mod actName
         let structuredJson : Json ← unsafe veilModel.toJson
         return .some { raw := ce, rawHtml := ← renderSmtModel ce, structuredJson := structuredJson }
@@ -403,5 +414,160 @@ def Module.generateInvariantVCs (mod : Module) : CommandElabM Unit := do
 def Module.generateVCs (mod : Module) : CommandElabM Unit := do
   mod.generateDoesNotThrowVCs
   mod.generateInvariantVCs
+
+/-! ## Persistent VC registry (`veil.gen.vcRegistry`) -/
+
+/-- Strip source info (and re-anchor ident raw `Substring`s) from syntax
+about to be persisted in the VC registry. The registry's `params`/
+`statement` fields are display/stub syntax only — but syntax fresh from
+elaboration carries `SourceInfo.original` whose leading/trailing
+`Substring`s (and each ident's `rawVal`) reference the **entire source
+string**: pickling one such reference embeds the whole file text in the
+olean, so the olean's content — and with it lake's content-addressed
+import traces, i.e. every importer's up-to-date check — changes on *any*
+source edit, comments included. Sanitized syntax is position-free and
+depends only on the syntax tree itself. -/
+private partial def sanitizePersistedSyntax : Syntax → Syntax
+  | .node _ k args => .node .none k (args.map sanitizePersistedSyntax)
+  | .atom _ val => .atom .none val
+  | .ident _ _ val pre => .ident .none (toString val).toSubstring val pre
+  | .missing => .missing
+
+/-- Persist the current VC manager's induction VCs as `mod`'s VC registry
+(`vcRegistryExt`): name/action/property/kind/style, the statement syntax
+(display/stub use), and the statement elaborated to a closed `Expr` — the
+ground truth the cross-file commands check against. Runs at `#gen_spec`
+(after VC generation) when `veil.gen.vcRegistry` is enabled.
+
+The statement elaborations are independent (closed statements against the
+current environment) and dominate the cost — measured ~62 ms each, i.e.
+~8 min *serial* on a ~7600-VC module — so they run in
+core-count parallel chunks, joined before the single extension write.
+Entry order (VC uid order) is preserved by in-order concatenation. -/
+def Module.persistVCRegistry (mod : Module) : CommandElabM Unit := do
+  let vcs ← Verifier.withVCManager fun ref => do
+    return (← ref.get).nodes.values.toArray
+  let vcs := vcs.qsort (·.uid < ·.uid)
+  let inductionVCs := vcs.filterMap fun vc =>
+    match vc.metadata with
+    | .induction m => some (vc, m)
+    | .trace _ => none
+  let nWorkers := max 1 ((← getNumCores) - 1)
+  let chunkSize := max 1 ((inductionVCs.size + nWorkers - 1) / nWorkers)
+  let mut chunks : Array (Array _) := #[]
+  let mut i := 0
+  while i < inductionVCs.size do
+    chunks := chunks.push
+      (inductionVCs.extract i (min (i + chunkSize) inductionVCs.size))
+    i := i + chunkSize
+  let mut joins : Array (IO.Promise (Except String (Array VCRegistryEntry))) := #[]
+  for chunk in chunks do
+    let promise ← IO.Promise.new
+    let cancelTk ← IO.CancelToken.new
+    let act ← Command.wrapAsyncAsSnapshot (fun () => do
+      -- Never let this task die without resolving the promise (cf. the
+      -- discharger-totality lesson: an unresolved promise hangs the join).
+      try
+        let entries ← liftTermElabM <| chunk.mapM fun (vc, m) => do
+          let ty ← vc.toVCStatement.type
+          return { name := vc.name, «action» := m.action, property := m.property,
+                   kind := m.kind, style := m.style,
+                   params := vc.params.map (⟨sanitizePersistedSyntax ·⟩),
+                   statement := ⟨sanitizePersistedSyntax vc.statement⟩,
+                   «type» := ty : VCRegistryEntry }
+        promise.resolve (.ok entries)
+      catch ex =>
+        let msg ← try ex.toMessageData.toString catch _ => pure "<unrenderable exception>"
+        promise.resolve (.error msg)) cancelTk
+    let task ← (act ()).asTask
+    Command.logSnapshotTask { stx? := none, cancelTk? := cancelTk, task }
+    joins := joins.push promise
+  let mut entries : Array VCRegistryEntry := #[]
+  for p in joins do
+    match p.result?.get with
+    | some (.ok es) => entries := entries ++ es
+    | some (.error msg) =>
+      throwError "VC registry for `{mod.name}`: statement elaboration failed: {msg}"
+    | none =>
+      throwError "VC registry for `{mod.name}`: an elaboration task dropped its result"
+  modifyEnv fun env => vcRegistryExt.addEntry env (mod.name, entries)
+  logInfo m!"VC registry persisted for `{mod.name}`: {entries.size} VCs \
+    (`veil.gen.vcRegistry`)"
+
+/-- The metadata a registry entry's re-created VC carries. Deliberately
+minimal (no params, no statement-dependency set — those are display/
+generation concerns of the defining file); re-created identically on every
+call, which is what makes the idempotence check below work. -/
+private def VCRegistryEntry.vcMetadata (e : VCRegistryEntry) : VCMetadata :=
+  .induction {
+    kind := e.kind, style := e.style, «action» := e.action,
+    property := e.property, baseParams := #[], extraParams := #[],
+    stmtDerivedFrom := {} }
+
+/-- The discharge tactic for a registry entry, mirroring in-file VC
+generation. Solver options are read at tactic runtime in the consuming
+file — there is no `#gen_spec` option capture on the cross-file path.
+Public: `#prove_vc` uses it as the default tactic. -/
+def VCRegistryEntry.dischargeTactic (e : VCRegistryEntry) :
+    CommandElabM (TSyntax `tactic) := do
+  if e.property == `doesNotThrow then `(tactic| veil_solve_wp_doesnotthrow)
+  else match e.style with
+    | .wp => `(tactic| veil_solve_wp)
+    | .tr => `(tactic| veil_solve_tr)
+
+private def VCRegistryEntry.nameSuffix (e : VCRegistryEntry) : String :=
+  match e.style with | .wp => "_WP" | .tr => "_TR"
+
+/-- Re-create a module's VCs in this file's VC manager from the persisted
+registry (`veil.gen.vcRegistry`), restricted to entries matching `pred`,
+with the same discharger structure as in-file generation (primary +
+dormant alternative per cell, retry ladder per `veil.smt.retries`). The
+statements are the persisted `Expr`s — identical to what the defining
+module's own sweep checks, by construction. Idempotent: cells already in
+the manager (by metadata equality) are skipped, so several commands over
+the same module in one file share VCs and results. -/
+def generateVCsFromRegistry (modName : Name)
+    (pred : VCRegistryEntry → Bool) : CommandElabM Unit := do
+  let some allEntries ← getVCRegistry? modName
+    | throwError "no VC registry for module `{modName}` in scope \
+        (modules with a registry: {(← vcRegistryModules).toList}). The \
+        defining module must be elaborated with `set_option \
+        veil.gen.vcRegistry true` before its `#gen_spec`."
+  let entries := allEntries.filter pred
+  if entries.isEmpty then
+    throwError "no VCs of module `{modName}` match this command"
+  -- Group into cells: (action, property) ↦ primary entry + alternatives.
+  let cells : Std.HashMap (Name × Name) (Array VCRegistryEntry) :=
+    entries.foldl (init := {}) fun m e =>
+      m.insert (e.action, e.property) ((m[(e.action, e.property)]?.getD #[]).push e)
+  let retriesFor : VCRegistryEntry → CommandElabM (Array (Nat × Term)) :=
+    fun e => do mkRetryTerms (← e.dischargeTactic)
+  Verifier.withVCManager fun ref => do
+    for (_, cellEntries) in cells do
+      let primary? := cellEntries.find? (·.kind == .primary)
+      let some primary := primary?
+        | throwError "VC registry for `{modName}` has a cell with no \
+            primary VC: {cellEntries.map (·.name)}"
+      let alternatives := cellEntries.filter (·.kind == .alternative)
+      let mgr ← ref.get
+      -- Idempotence: skip cells whose primary VC already exists.
+      if (mgr.findVCByFilter (· == primary.vcMetadata)).isSome then
+        continue
+      let mkData (e : VCRegistryEntry) : VCData VCMetadata := {
+        name := e.name, params := e.params, statement := e.statement,
+        typeExpr? := some e.type, metadata := e.vcMetadata }
+      let addDischargers (mgr : VCManager VCMetadata SmtResult) (vcId : VCId)
+          (e : VCRegistryEntry) : CommandElabM (VCManager VCMetadata SmtResult) := do
+        let tac ← e.dischargeTactic
+        let term ← `(by $tac:tactic)
+        let mgr ← mgr.mkAddDischarger vcId
+          (VCDischarger.fromTerm term e.action (nameSuffix := e.nameSuffix))
+        mgr.addRetryDischargers vcId e.action e.nameSuffix (← retriesFor e)
+      let (mgr, primaryId) := mgr.addVC (mkData primary) {} #[]
+      let mut mgr ← addDischargers mgr primaryId primary
+      for alt in alternatives do
+        let (mgr', altId) := mgr.addAlternativeVC (mkData alt) primaryId #[]
+        mgr ← addDischargers mgr' altId alt
+      ref.set mgr
 
 end Veil
