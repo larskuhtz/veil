@@ -86,6 +86,7 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
   if !actionNames.isEmpty then
     let (className, classDecl) ← mkEnumAxiomatisation actionTagType actionNames
     elabVeilCommand classDecl
+    addVeilStructureRanges ((← getCurrNamespace) ++ className.getId) stx
     for cmd in (← mkEnumConcreteType actionTagType actionNames) do
       elabVeilCommand cmd
     elabVeilCommand $ ← `(open $className:ident)
