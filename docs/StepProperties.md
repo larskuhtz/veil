@@ -2,8 +2,10 @@
 
 *Design note, written against the fork at `8a2f00f7` (Lean 4.32). Status:
 Part I (generated step lemmas) is implemented in
-`Veil/Frontend/DSL/Module/StepLemmas.lean` as described here; Part II is
-designed, not implemented; Part III is the declared next step.*
+`Veil/Frontend/DSL/Module/StepLemmas.lean`; Part II (`step_property`) is
+implemented across the assertion, VC-generation, tactic and composition
+layers as described here (§3, with the deviations noted in §3.9); Part III
+is the declared next step.*
 
 This note covers three related additions to Veil, in the order they are to
 be built:
@@ -480,8 +482,8 @@ step-specific local bridge (only if measurement demands it).
 `VeilTest/StepProperty.lean`: a module with a monotone relation, a
 counter, and a flag; `step_property`s that hold (`r N → r' N`; a frozen
 relation under a guard, which needs the guard; one that needs an
-invariant), and one that fails on one action (pinned ❌ with the
-counterexample under `veil.printCounterexamples`); the sweep report with the
+invariant), and one that fails on one action (pinned ❌; see §3.9 on the
+counterexample); the sweep report with the
 new header wording; a primed immutable rejected; `#gen_theorems` +
 `#print axioms` on a cell and on `P_step`; `#veil_status` total.
 `VeilTest/StepPropertyBase.lean` + `VeilTest/StepPropertyRegistry.lean`: the
@@ -497,7 +499,66 @@ is set; the paper's monotonicity, which needs an invariant of the
 pre-state) — both models re-solve green with the new cells, and
 `#veil_status` counts them.
 
-### 3.9 Branch and dependencies
+### 3.9 Implementation notes
+
+What was built follows §3.2–§3.6; the points below are where the code is
+more specific than the design, or departs from it.
+
+* **Elaboration.** The body is elaborated by a two-state variant of the
+  assertion machinery (`withTheoryAndTwoStates` in `Util/Assertions.lean`):
+  three targets — the theory, the pre-state, and the post-state whose
+  components are bound under their primed names — and binders
+  `(th : ρ) (st : σ) (st' : σ)`, so the property's type is `ρ → σ → σ → Prop`
+  over the module's usual parameter telescope. `defineAssertion` selects it
+  by kind. A step property is *not* a local reader-proposition
+  (`isStateAssertionWithState … = false`): it is not part of `Invariants`,
+  not in the invariant clumps, and not seen by the model checker or the
+  trace commands, exactly as §3.5 intends.
+* **Primed immutables** are rejected syntactically at the elaborator
+  (`throwIfStepPropertyPrimesImmutable`), before the term is elaborated, with
+  the message anchored at the offending identifier — the two-state
+  elaboration would otherwise fail on an unbound name far from the cause.
+* **Cells.** `mkStepPropertyVC` (`VCGen/Induction.lean`) is a thin wrapper
+  over the existing `mkVCForSpecTheorem` with the two-state spec form, the
+  `.step` style and the `<action>_<property>` name; `generateStepPropertyVCs`
+  is called from `ensureSpecIsFinalized` right after `generateInvariantVCs`
+  (and from `generateVCs`), one primary VC per action × property with the
+  `_STEP` discharger and the usual retry ladder. `actionIdent` resolves
+  `.step` like `.tr` (the pre-computed `ext.tr`).
+* **Exports.** `emitStepLemmaCore` (`Module/Composition.lean`) instantiates
+  the property constant at the canonical spine by *binder name*, through a
+  `byName` map now carried by `CanonicalRTS` (the same map that instantiates
+  `Invariants`). The exported statement therefore shows `Invariants` at the
+  module's own instantiation — its four explicit parameters (reader, state,
+  sorts, representation family) — where §3.6 wrote the schematic
+  `Invariants th s`; the RTS telescope (sorts implicit, `Inhabited` and
+  protocol classes explicit) is the binder regime, and `th s s' l` are
+  implicit on both `<P>_step` and `reachable_<P>_step`. The per-action cell
+  theorem is located through the file-family layouts (`ns`, `ns.Proofs`,
+  `M.Proofs`, `M`) by `resolveCellTheorem`. Cross-file, the property names
+  come from the registry's `.step` entries (`stepPropertiesOf`); inside the
+  defining module, from the module state.
+* **`transition`-syntax actions** have no `derived_eq`, so a module
+  containing one gets its step *cells* (checked as usual) but no
+  `<P>_step` export: `emitStepLemmaCore` reports which action blocks it.
+  Same limitation, same reason, as the L14 preservation lemmas.
+* **Reporting.** `#gen_theorems` prints its step-lemma summary line only
+  when the module has step properties; `#gen_composition` appends a count of
+  step exports to its single info line. The sweep header changes wording only
+  when a `.step` cell is present, so no existing pin moved.
+* **Tests** as in §3.8, with two pinning deviations: the refuted cell is
+  pinned with counterexample printing off (the model text is not stable
+  enough to pin), and the `#gen_theorems` / `#gen_composition` /
+  `#prove_action` summaries are unpinned because they carry timings. The
+  consumer example is written against `reachable_<P>_step`, whose hypotheses
+  need no module instances; stating the conclusion by hand outside the module
+  would require the canonical representation instances, which the regime
+  passes explicitly.
+* **Discharge** is as designed (`veil_solve_step`); the step-specific local
+  bridge of §3.4 was not needed — every step cell in the tests and in the
+  downstream validation closes on the conservative route.
+
+### 3.10 Branch and dependencies
 
 `port/step-properties`, on `port/composition` (`55d7518c`), which contains
 `port/vc-registry` (the `VCStyle` field of the registry entry and the
