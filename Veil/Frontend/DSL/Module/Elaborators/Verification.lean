@@ -437,6 +437,10 @@ def elabProveAction : CommandElab := fun stx => do
     else
       logInfoAt stx m!"#prove_action {modName} {actionName}: every cell was \
         already proven in namespace `{ns}`; nothing to solve"
+    -- `#gen_composition`: with every cell persisted, emit the one
+    -- lemma the composition consumes — the per-action preservation lemma
+    -- (`step_<action>` / `init_case`), kernel-checked like everything else.
+    emitPreservationLemma stx modName actionName
 
 @[command_elab Veil.proveVC]
 def elabProveVC : CommandElab := fun stx => do
@@ -504,5 +508,11 @@ def elabGenTheorems : CommandElab := fun stx => do
     -- batch pass below covers the rest (stragglers, lazy-dropped witnesses).
     let _ ← Verifier.waitFilteredSync (fun _ => true) (persistIncrementally := true)
     Verifier.addProvenTheoremsInDependencyOrder (fun _ => true)
+    -- `#gen_composition`: with the cells persisted, emit the per-action
+    -- preservation lemmas (`init_case` / `step_<action>`) into this
+    -- namespace, exactly as `#prove_action` does per proof file — so a
+    -- module verified in-file composes like a file family. Best-effort;
+    -- one summary message.
+    emitPreservationLemmas stx mod.name
 
 end Veil

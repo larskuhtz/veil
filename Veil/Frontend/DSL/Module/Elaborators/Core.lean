@@ -9,6 +9,7 @@ public meta import Veil.Frontend.DSL.Module.Util
 public meta import Veil.Frontend.DSL.Action.Elaborators
 public meta import Veil.Frontend.DSL.State.SubState
 public meta import Veil.Frontend.DSL.State.ConcreteRegistry
+public meta import Veil.Frontend.DSL.Module.Composition
 public meta import Veil.Core.UI.Trace.TraceDisplay
 public meta import Veil.Core.Tools.ModelChecker.Concrete.Checker
 public meta import Veil.Core.Tools.ModelChecker.Simulation
