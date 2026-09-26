@@ -11,6 +11,7 @@ public meta import Veil.Core.UI.Widget.RefreshComponent
 public meta import Veil.Frontend.DSL.Infra.Metadata
 public meta import Veil.Core.Tools.Verifier.Results
 public meta import Veil.Core.Tools.Verifier.Server
+public meta import Veil.Util.ProofCache
 
 public meta section
 
@@ -441,6 +442,20 @@ private def formatRetainedWitnessesNote [Monad m] [MonadOptions m] [MonadLiftT B
     this module does not run `#gen_theorems`, unset the option — retained \
     witnesses are never freed otherwise.\n"
 
+/-- One ♻ summary line for the proof cache (`veil.cache.proofs`) — the
+same-cost-visibility principle: whatever the
+cache skipped must say so in build output. Process-cumulative counters
+(hits include every discharge path of this elaboration); per-hit detail is
+on `trace.veil.cache`. Shown only when the option is enabled and the cache
+was touched. -/
+private def formatProofCacheNote [Monad m] [MonadOptions m] [MonadLiftT BaseIO m] :
+    m (Option MessageData) := do
+  unless veil.cache.proofs.get (← getOptions) do return none
+  let (hits, stores) ← (ProofCache.stats.get : BaseIO _)
+  if hits == 0 && stores == 0 then return none
+  return some m!"♻ proof cache (`veil.cache.proofs`): {hits} hits (each \
+    re-checked against the live goal), {stores} stored.\n"
+
 /-- Format verification results as text output for logging. -/
 def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
     (results : VerificationResults VCMetadata SmtResult) : m MessageData := do
@@ -485,6 +500,8 @@ def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
     msg := msg ++ sizeMsg
   if let some retainedMsg ← formatRetainedWitnessesNote then
     msg := msg ++ retainedMsg
+  if let some cacheMsg ← formatProofCacheNote then
+    msg := msg ++ cacheMsg
   return msg
 
 /-- Check if any VCs have non-proven status. -/
