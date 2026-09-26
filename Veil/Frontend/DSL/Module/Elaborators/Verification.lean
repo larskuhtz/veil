@@ -169,6 +169,11 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
     let (rtsCmd, mod) ← Module.assembleRelationalTransitionSystem mod
     elabVeilCommand rtsCmd
     pure mod
+  -- Frame / monotonicity / initial-value lemmas derived from the pre-computed
+  -- transitions (`veil.gen.stepLemmas`; solver-free, kernel-checked, silent).
+  -- See `Module/StepLemmas.lean`.
+  if ← isStepLemmasEnabled then
+    mod.emitStepLemmas
   Verifier.runManager
   -- The manager has been reset for this elaboration; cross-file check
   -- commands later in this file must not reset it again.
