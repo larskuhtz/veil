@@ -45,9 +45,18 @@ private def mkVeilSmtTactic : TacticM (TSyntax `tactic) := do
     return ← `(tactic| (veil_infer_nonempty; $smtTac:tactic))
 
 def elabVeilSmt (stx : Syntax) (trace : Bool := false) : DesugarTacticM Unit := withBackwardsCompatibility <| veilWithMainContext do
+  -- Reconstruction mode: fold Bool atoms into opaque Prop predicates first,
+  -- so lean-smt's whole-telescope `embedding` pass has nothing to do (see
+  -- `__veil_fold_bool_atoms`). Runs before `mkVeilSmtTactic` so the hint
+  -- idents are collected from the folded context.
+  let opts ← getOptions
+  if !veil.smt.trust.get opts && veil.smt.foldBoolAtoms.get opts then
+    veilWithMainContext <| veilEvalTactic <| ← `(tactic| __veil_fold_bool_atoms)
+    -- The fold's hypothesis-local pre-simp can close trivial goals.
+    if (← getUnsolvedGoals).isEmpty then return
   -- It's necessary to `open Classical` to make proof reconstruction work.
   -- Otherwise, sometimes it fails due to failing to infer `Decidable` instances.
-  let auto_tac ← mkVeilSmtTactic
+  let auto_tac ← veilWithMainContext mkVeilSmtTactic
   if trace then
     addSuggestion stx auto_tac
   else
