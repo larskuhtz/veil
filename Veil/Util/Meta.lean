@@ -243,6 +243,57 @@ private def stxForVeilDefinition (red : ReducibilityHints) (attrs : Array Attrib
   | .opaque =>
     `(command|$[$attrs?:attributes]? opaque $(mkIdent baseName) : $typeStx := $eStx)
 
+/-- The part of the Veil command `stx` that names what it declares — the
+*selection range* of a declaration generated from it: the `[name]` of an
+assertion, else the first identifier among the command's arguments
+(`action mark`, `relation r`, `type node`). A `#`-command (`#gen_spec`,
+`#gen_theorems`, …) emits rather than names, so it selects its keyword. -/
+def veilDeclSelectionRef (stx : Syntax) : Syntax := Id.run do
+  if let some (.atom _ kw) := stx.getHead? then
+    if kw.startsWith "#" then return stx[0]
+  -- Look one `optional`/`many` level deep: `invariant [n] …` wraps the
+  -- `propertyName` in a null node.
+  let args := stx.getArgs.flatMap fun a => if a.isOfKind nullKind then a.getArgs else #[a]
+  if let some p := args.find? (·.isOfKind `Veil.propertyName) then
+    return p[1]
+  if let some id := args.find? (·.isIdent) then
+    return id
+  return stx[0]
+
+/-- Record `ref` as the source location of the generated declaration
+`declName` — the range doc-gen4 source links and go-to-definition use —
+unless it already has one. `addDecl` records no location, so every Veil
+declaration added through it would otherwise have none. `ref` is the user
+command the declaration comes from (see `veilDeclSelectionRef`); a
+position-less `ref` records nothing. -/
+def addVeilDeclarationRanges [Monad m] [MonadEnv m] [MonadFileMap m] [MonadLiftT BaseIO m]
+    (declName : Name) (ref : Syntax) : m Unit := do
+  if (← findDeclarationRanges? declName).isSome then return
+  addDeclarationRangesFromSyntax declName ref (veilDeclSelectionRef ref)
+
+/-- Mark `nameStx`, the identifier with which a user command declares
+`declName`, as `declName`'s definition site: a binder `TermInfo` for the
+constant on that identifier. Together with a selection range equal to the
+identifier's (`addVeilDeclarationRanges`), this is what hover and
+find-references at the declaration, and SubVerso's definition detection
+(Verso's per-declaration anchors), look for. `addDecl`-based declarations get
+neither from Lean. Does nothing for a non-identifier or an absent constant. -/
+def addVeilDefinitionSiteInfo (nameStx : Syntax) (declName : Name) : CommandElabM Unit := do
+  unless nameStx.isIdent && (← getEnv).contains declName do return
+  liftTermElabM do
+    Term.addTermInfo' nameStx (← mkConstWithLevelParams declName) (isBinder := true)
+
+/-- `addVeilDeclarationRanges` for the constructor and the projections of
+the generated structure (or class) `structName`: a structure elaborated from
+position-less identifiers records its own range but none for these. -/
+def addVeilStructureRanges [Monad m] [MonadEnv m] [MonadFileMap m] [MonadLiftT BaseIO m]
+    (structName : Name) (ref : Syntax) : m Unit := do
+  let env ← getEnv
+  let some info := getStructureInfo? env structName | return
+  addVeilDeclarationRanges (getStructureCtor env structName).name ref
+  for field in info.fieldInfo do
+    addVeilDeclarationRanges field.projFn ref
+
 /-- You MUST call `enableRealizationsForConst` and
 `Elab.Term.applyAttributes` after calling this function and before the
 elaborator ends. -/
@@ -262,6 +313,7 @@ def addVeilDefinitionAsync (n : Name) (e : Expr) (compile := true)
     mkDefinitionValEx fullName levels type e red (DefinitionSafety.safe) []
   addDecl decl (forceExpose := true)
   if compile then compileDecl decl
+  addVeilDeclarationRanges fullName (← getRef)
   trace[veil.desugar] "{← stxForVeilDefinition red attr n type e}"
   return fullName
 
@@ -285,6 +337,7 @@ def addVeilTheorem (n : Name) (statement : Expr) (proof : Expr) (attr : Array At
     let fullName ← if addNamespace then pure $ (← getCurrNamespace).append n else pure n
     let decl := Declaration.thmDecl (mkTheoremValEx fullName [] statement proof [])
     addDecl decl
+    addVeilDeclarationRanges fullName (← getRef)
     enableRealizationsForConst fullName
     Term.applyAttributes fullName attr
     return fullName
