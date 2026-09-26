@@ -403,8 +403,47 @@ private def formatSlowVCsReport [Monad m] [MonadOptions m]
     msg := msg ++ m!"  {formatMs time}  {name}{flag}\n"
   return some msg
 
+/-- Format the witness-size report (`veil.report.witnessSizes`): aggregate
+statistics plus the largest witnesses, from the sizes the dischargers
+recorded in `Verifier.witnessSizeRegistry`. Entries are deduplicated by
+discharger name (later measurements win). Off by default. -/
+private def formatWitnessSizesReport [Monad m] [MonadOptions m] [MonadLiftT BaseIO m] :
+    m (Option MessageData) := do
+  unless veil.report.witnessSizes.get (← getOptions) do return none
+  let entries ← (witnessSizeRegistry.get : BaseIO _)
+  if entries.isEmpty then return none
+  let deduped := entries.foldl (init := (∅ : Std.HashMap Name WitnessSizeEntry))
+    fun acc e => acc.insert e.discharger e
+  let entries := deduped.valuesArray
+  let total := entries.foldl (init := 0) (· + ·.numObjs)
+  let sorted := entries.qsort (fun a b => a.numObjs > b.numObjs)
+  let topN := sorted.take 10
+  let mut msg := m!"Witness sizes (heap objects, DAG-aware; \
+    {entries.size} witnesses, total {total}, mean {total / entries.size}, \
+    top {topN.size}):\n"
+  for e in topN do
+    let flag := if e.trusted then " (trusted leaf)" else " (reconstructed)"
+    msg := msg ++ m!"  {e.numObjs}  {e.discharger}{flag}\n"
+  return some msg
+
+/-- Note how many proof witnesses are currently retained in memory for
+streaming `#gen_theorems` persistence (`veil.gen.streamTheorems`) — and, in
+particular, that a module which never runs `#gen_theorems` should not set the
+option (retention would never be released). Shown only when the option is
+enabled. -/
+private def formatRetainedWitnessesNote [Monad m] [MonadOptions m] [MonadLiftT BaseIO m] :
+    m (Option MessageData) := do
+  unless veil.gen.streamTheorems.get (← getOptions) do return none
+  let count ← (vcManager.atomically fun ref => return (← ref.get).retainedWitnessCount : BaseIO _)
+  if count == 0 then return none
+  return some m!"{count} proof witnesses retained in memory for `#gen_theorems` \
+    (`veil.gen.streamTheorems`); it releases each one as it is persisted. If \
+    this module does not run `#gen_theorems`, unset the option — retained \
+    witnesses are never freed otherwise.\n"
+
 /-- Format verification results as text output for logging. -/
-def formatVerificationResults [Monad m] [MonadOptions m](results : VerificationResults VCMetadata SmtResult) : m MessageData := do
+def formatVerificationResults [Monad m] [MonadOptions m] [MonadLiftT BaseIO m]
+    (results : VerificationResults VCMetadata SmtResult) : m MessageData := do
   let includeCounterexamples := veil.printCounterexamples.get (← getOptions)
   let vcs := results.vcs.filter fun vc =>
     vc.metadata.isInduction && !vc.isDormant && vc.alternativeFor.isNone
@@ -442,6 +481,10 @@ def formatVerificationResults [Monad m] [MonadOptions m](results : VerificationR
           msg := msg ++ diagnosticMsg
   if let some slowMsg ← formatSlowVCsReport results then
     msg := msg ++ slowMsg
+  if let some sizeMsg ← formatWitnessSizesReport then
+    msg := msg ++ sizeMsg
+  if let some retainedMsg ← formatRetainedWitnessesNote then
+    msg := msg ++ retainedMsg
   return msg
 
 /-- Check if any VCs have non-proven status. -/

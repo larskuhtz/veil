@@ -227,6 +227,19 @@ register_option veil.report.nearTimeoutPercent : Nat := {
   model change (e.g. one added invariant) may push them past the timeout."
 }
 
+register_option veil.report.witnessSizes : Bool := {
+  defValue := false
+  descr := "If true, measure the heap size (DAG-aware object count, \
+  `Lean.Expr.numObjs`) of every successful discharger's proof witness and \
+  append a summary report to the verification results. Diagnostic \
+  instrumentation for the witness-size blowup of large modules (each WP \
+  witness embeds the full normalisation chain of its action against the \
+  assembled invariant clump); off by default so command output stays \
+  deterministic. The registry is cumulative per Lean module elaboration; \
+  when several check commands run in one module, later measurements of the \
+  same discharger win."
+}
+
 register_option veil.experimental.wpCompact : Bool := {
   defValue := true
   descr := "Experimental. If true, compact generated `wp_local_eq.pred` definitions by sharing duplicated postcondition branches with `letEq` and exposing abstract-state conditionals field-wise."
@@ -242,6 +255,21 @@ register_option veil.lazyWitnessRegen : Bool := {
   (the pre-2026-06-10 behavior); useful for debugging regen behavior or when \
   `#gen_theorems` is called repeatedly on the same VCs and the per-call regen \
   cost dominates the memory savings."
+}
+
+register_option veil.gen.streamTheorems : Bool := {
+  defValue := false
+  descr := "If true, dischargers retain their full proof witness after a \
+  successful discharge (instead of dropping it, `veil.lazyWitnessRegen`) so \
+  that `#gen_theorems` can persist each proven VC incrementally — while the \
+  sweep is still running — and release the witness immediately after adding \
+  its theorem to the environment. This is the scalable persistence mode for \
+  proof-reconstruction runs (`veil.smt.trust false`), where lazy witness \
+  regeneration would re-run every proof reconstruction serially after the \
+  sweep. Like all discharger behavior, retention is captured at `#gen_spec` — \
+  set this option before `#gen_spec`, and only in modules that run \
+  `#gen_theorems` (without it, retained witnesses are never released and \
+  peak memory grows by the total witness mass)."
 }
 
 register_option veil.simulate.numTraces : Nat := {
