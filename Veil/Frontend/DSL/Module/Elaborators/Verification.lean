@@ -242,6 +242,32 @@ def logVerificationResults (stx : Syntax) (results : VerificationResults VCMetad
     logWarningAt stx (trustedSmtWarning trustedCount)
   addUndischargedTheoremSuggestion stx results
 
+/-- Before any solver starts on the module's VCs (in-file): check every
+`Prop` field of its instantiated classes against the first-order fragment
+the SMT translation accepts — one error naming class and field, instead of
+an opaque solver failure on every cell — and report the fields withheld
+with `veil_smt_ignore`, once per module per file. The instances are the
+module's theory-level parameters (sorts, user parameters, instantiated
+classes), elaborated as binders. -/
+private def checkModuleSolverHypotheses (stx : Syntax) (mod : Module) : CommandElabM Unit := do
+  let params ← mod.declarationBaseParams (.stateAssertion .assumption)
+  let binders ← params.mapM (·.binder)
+  let withheld ← liftTermElabM <| Term.elabBinders binders fun vs =>
+    analyzeInstantiatedClasses mod.name vs
+  reportWithheldSolverHypotheses stx mod.name withheld
+
+/-- The cross-file counterpart of `checkModuleSolverHypotheses`: the
+instantiated classes are the instance-implicit binders of the persisted VC
+statements (all cells of a module share them, so one entry suffices). -/
+private def checkRegistrySolverHypotheses (stx : Syntax) (modName : Name)
+    (entries : Array VCRegistryEntry) : CommandElabM Unit := do
+  let some e := entries[0]? | return
+  let withheld ← liftTermElabM <| Meta.forallTelescope e.type fun vs _ => do
+    let insts ← vs.filterM fun v => do
+      return (← v.fvarId!.getBinderInfo) == .instImplicit
+    analyzeInstantiatedClasses modName insts
+  reportWithheldSolverHypotheses stx modName withheld
+
 private def runFilteredInvariantCheck
     (stx : Syntax)
     (mod : Module)
@@ -250,6 +276,7 @@ private def runFilteredInvariantCheck
   if ← isNoVerifyMode then
     logWarningAt stx m!"⏭ skipped (veil.noVerify): no VCs were solved"
     return
+  checkModuleSolverHypotheses stx mod
   warnIfSolverOptionsChangedSinceVCGen stx mod
   Verifier.runFilteredAsync filter (logVerificationResults stx)
   Verifier.displayStreamingResults stx
@@ -344,6 +371,8 @@ private def runRegistryFilteredCheck (stx : Syntax) (modName : Name)
     logWarningAt stx m!"⏭ skipped (veil.noVerify): no VCs were solved"
     return
   throwIfInsideDefiningModule modName
+  if let some entries ← getVCRegistry? modName then
+    checkRegistrySolverHypotheses stx modName entries
   armCrossFileVerifier
   generateVCsFromRegistry modName pred
   Verifier.runFilteredAsync filter (logVerificationResults stx)
@@ -416,6 +445,7 @@ def elabProveAction : CommandElab := fun stx => do
     let some allEntries ← getVCRegistry? modName
       | throwError "no VC registry for module `{modName}` in scope \
           (modules with a registry: {(← vcRegistryModules).toList})"
+    checkRegistrySolverHypotheses stx modName allEntries
     -- Kernel replay (`veil.cache.kernelReplay`): cache hits at the
     -- command level. A replayed cell is `addDecl`ed under its canonical
     -- name — that `addDecl` IS the kernel check — and is then consumed by
@@ -536,6 +566,8 @@ def elabGenTheorems : CommandElab := fun stx => do
       return
     let mod ← getCurrentModule (errMsg := "You cannot #gen_theorems outside of a Veil module!")
     mod.throwIfSpecNotFinalized
+    -- `#gen_theorems` may be the first command to start the dischargers.
+    checkModuleSolverHypotheses stx mod
     -- UX guard: witness retention (`veil.gen.streamTheorems`) is discharger
     -- behavior, captured at `#gen_spec` — enabling the option only around this
     -- command is inert (§: `solverOptionsAtVCGen` capture semantics).
