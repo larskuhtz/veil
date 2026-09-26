@@ -265,6 +265,15 @@ def Module.ensureStateIsDefined (mod : Module) : CommandElabM Module := do
   pure mod
 
 private def Module.ensureExecutableModelCheckerDefinitions (mod : Module) : CommandElabM Unit := do
+  -- The EnumerableTransitionSystem (and the `Enumeration`/`FinEncodableInjOnly`
+  -- `Label` instances it consumes) are only generated when
+  -- `veil.gen.modelCheckScaffolding` is enabled. With it off, `#model_check`
+  -- and `#simulate` are unavailable by design; fail with a clear message rather
+  -- than a confusing missing-instance error from `assembleEnumerableTransitionSystem`.
+  unless (← isModelCheckScaffoldingEnabled) do
+    throwError "`#model_check` and `#simulate` require `veil.gen.modelCheckScaffolding` (currently false). \
+      Re-enable it to generate the EnumerableTransitionSystem. `#check_invariants` \
+      and `#check_action` do not require it."
   if (← getEnv).contains (mod.name ++ enumerableTransitionSystemName) then
     return
   let savedState ← get
