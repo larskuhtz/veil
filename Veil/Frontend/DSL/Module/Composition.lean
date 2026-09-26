@@ -760,7 +760,6 @@ def emitComposition (stx : Syntax) (modName : Name) : CommandElabM Unit := do
 def elabGenComposition : CommandElab := fun stx => do
   withTraceNode `veil.perf.elaborator.genComposition
       (fun _ => return "#gen_composition") do
-    if ← isModelCheckCompileMode then return
     emitComposition stx stx[1].getId
 
 /-! ## `#gen_proof_files` — scaffold the verified-module file family -/
@@ -887,7 +886,6 @@ def emitProofFiles (stx : Syntax) (modName : Name) : CommandElabM Unit := do
 
 @[command_elab Veil.genProofFiles]
 def elabGenProofFiles : CommandElab := fun stx => do
-  if ← isModelCheckCompileMode then return
   emitProofFiles stx stx[1].getId
 
 /-! ## `#veil_status` — the audit command
@@ -1067,7 +1065,6 @@ def reportVeilStatus (stx : Syntax) (modName : Name) (showTable : Bool) : Comman
 @[command_elab Veil.veilStatus]
 def elabVeilStatus : CommandElab := fun stx => do
   withTraceNode `veil.perf.elaborator.veilStatus (fun _ => return "#veil_status") do
-    if ← isModelCheckCompileMode then return
     let showTable ←
       if stx[2].isNone then pure false
       else if stx[2][0].getId == `table then pure true

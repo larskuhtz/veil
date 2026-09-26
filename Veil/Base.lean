@@ -1,4 +1,9 @@
-import Lean
+module
+
+public import Lean.Data.Options
+import Lean.Util.Trace
+
+public section
 open Lean
 
 /-! # Veil
@@ -107,9 +112,14 @@ register_option veil.gen.stepLemmas : Bool := {
   Set to false to skip the derivation."
 }
 
-register_option veil.__modelCheckCompileMode : Bool := {
-  defValue := false
-  descr := "(INTERNAL ONLY. DO NOT USE.) When true, skip verification-only operations for model checking compilation."
+register_option veil.extract.shareValueLets : Bool := {
+  defValue := true
+  descr := "If true (the default), extraction keeps ordinary value `let`s shared \
+  in the extracted term instead of zeta-reducing them. Sharing makes the extracted \
+  term smaller but costs extraction time, and the compiler's `pullInstances` and \
+  `cse` passes run before its first `simp` and recover the sharing anyway. Join \
+  points are shared either way; inlining those is exponential in the number of \
+  sequential branches and no later pass can undo it."
 }
 
 register_option veil.gen.vcRegistry : Bool := {
@@ -448,6 +458,25 @@ register_option veil.cache.kernelReplay : Bool := {
   suffix, so the unreachable-/unused-tactic linters flag it — set \
   `linter.unreachableTactic`/`linter.unusedTactic` to false in files that \
   expect hits."
+}
+
+register_option veil.simulate.numTraces : Nat := {
+  defValue := 10000
+  descr := "Number of simulation traces to attempt, stopping early on a violation or cancellation. Default is 10000."
+}
+
+register_option veil.simulate.maxSteps : Nat := {
+  defValue := 100
+  descr := "Maximum number of action transitions per simulation trace, excluding the initial state. Default is 100."
+}
+
+register_option veil.modelChecker.maxStoredBuilds : Nat := {
+  defValue := 1
+  descr := "Maximum number of compiled builds of `#model_check` and `#simulate` stored in \
+  `.lake/model_checker_builds`; 0 means no limit, so builds are never deleted. When a run ends, \
+  cleanup keeps the most recently compiled builds up to this limit, allowing later runs to reuse \
+  them. Builds that running checks use are never deleted, even beyond the limit. Cleanup is \
+  skipped if another build holds the build lock. The default of 1 retains the latest build."
 }
 
 end Veil

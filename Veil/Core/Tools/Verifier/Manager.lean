@@ -1,7 +1,11 @@
-import Lean
-import Std.Sync.Channel
-import Veil.Backend.SMT.Result
-import Veil.Util.TopologicalSort
+module
+
+public meta import Lean
+public meta import Std.Sync.Channel
+public meta import Veil.Backend.SMT.Result
+public meta import Veil.Util.TopologicalSort
+
+public meta section
 open Lean Std
 
 namespace Veil
@@ -183,7 +187,7 @@ structure Discharger (ResultT : Type) where
   /-- Creates a task that discharges the VC. Running the resulting `BaseIO`
   action causes the task to be started eagerly. The task should be stored in
   the `task` field for later access. -/
-  private mkTask : BaseIO SnapshotTreeTask
+  mkTask : BaseIO SnapshotTreeTask
 
   /-- Closure that re-elaborates the proof witness on demand, populated for
   successfully proven VCs whose witness was dropped from `_dischargerResults`

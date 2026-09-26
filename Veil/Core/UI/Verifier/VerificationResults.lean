@@ -1,16 +1,20 @@
-import Lean.Server.Rpc.Basic
-import Lean.Elab.Command
-import Lean.PrettyPrinter
+module
 
-import Veil.Base
-import ProofWidgets.Component.Basic
-import ProofWidgets.Component.HtmlDisplay
-import Veil.Core.UI.Widget.RefreshComponent
-import Veil.Frontend.DSL.Infra.Metadata
-import Veil.Core.Tools.Verifier.Results
-import Veil.Core.Tools.Verifier.Server
-import Veil.Util.ProofCache
-import Veil.Util.CheapRung
+public meta import Lean.Server.Rpc.Basic
+public meta import Lean.Elab.Command
+public meta import Lean.PrettyPrinter
+
+public meta import Veil.Base
+public meta import ProofWidgets.Component.Basic
+public meta import ProofWidgets.Component.HtmlDisplay
+public meta import Veil.Core.UI.Widget.RefreshComponent
+public meta import Veil.Frontend.DSL.Infra.Metadata
+public meta import Veil.Core.Tools.Verifier.Results
+public meta import Veil.Core.Tools.Verifier.Server
+public meta import Veil.Util.ProofCache
+public meta import Veil.Util.CheapRung
+
+public meta section
 
 section
 
