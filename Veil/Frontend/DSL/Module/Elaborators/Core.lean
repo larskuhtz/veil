@@ -413,10 +413,36 @@ def elabAssertion : CommandElab := fun stx => do
     | .trustedInvariant => "trusted_invariant"
     | .termination => "termination"
     | .stateConstraint => "state_constraint"
+    | .stepProperty => "step_property"
   withTraceNode (`veil.perf.elaborator.assertion ++ assertion.name) (fun _ => return s!"{kindStr} {assertion.name}") do
     -- Elaborate the assertion in the Lean environment
     let mod' ← mod.defineAssertion assertion
   --   dbg_trace s!"Elaborated assertion: {← liftTermElabM <|Lean.PrettyPrinter.formatTactic stx}"
+    localEnv.modifyModule (fun _ => mod')
+
+/-- A `step_property` body may prime any mutable component (`f'` is its
+post-state value). An immutable component has no post-state: say so at the
+identifier, before the theory/state elaboration fails on an unbound name. -/
+private def throwIfStepPropertyPrimesImmutable (mod : Module) (prop : Term) : CommandElabM Unit := do
+  for comp in mod.immutableComponents do
+    let primed := comp.name.appendAfter "'"
+    if let some bad := prop.raw.find? fun s => s.isIdent && s.getId == primed then
+      throwErrorAt bad "`{primed}`: `{comp.name}` is an immutable state component, so it has \
+        no post-state value. Write `{comp.name}`; only mutable components have a primed form \
+        in a `step_property`."
+
+@[command_elab Veil.stepPropertyDeclaration]
+def elabStepProperty : CommandElab := fun stx => do
+  let mut mod ← getCurrentModule (errMsg := "You cannot declare a step property outside of a Veil module!")
+  mod ← mod.ensureStateIsDefined
+  mod.throwIfSpecAlreadyFinalized
+  let assertion : StateAssertion ← match stx with
+  | `(command|step_property $name:propertyName ? { $prop:term }) => do
+    throwIfStepPropertyPrimesImmutable mod prop
+    mod.mkAssertion .stepProperty name prop stx
+  | _ => throwUnsupportedSyntax
+  withTraceNode (`veil.perf.elaborator.assertion ++ assertion.name) (fun _ => return s!"step_property {assertion.name}") do
+    let mod' ← mod.defineAssertion assertion
     localEnv.modifyModule (fun _ => mod')
 
 open Lean Meta Elab Command Veil in

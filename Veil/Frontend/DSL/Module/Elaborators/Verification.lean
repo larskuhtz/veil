@@ -185,6 +185,7 @@ def Module.ensureSpecIsFinalized (mod : Module) (stx : Syntax) : CommandElabM Mo
     -- Run doesNotThrow VCs asynchronously and log errors at assertion locations when done
     Verifier.runFilteredAsync Verifier.isDoesNotThrow logDoesNotThrowErrors
   mod.generateInvariantVCs
+  mod.generateStepPropertyVCs
   -- Persist the VC registry (statements as `Expr`s) for cross-file
   -- checking/proving. Solve-free; deliberately also runs under
   -- `veil.noVerify` — it is exactly what a model-only file needs.
@@ -554,5 +555,9 @@ def elabGenTheorems : CommandElab := fun stx => do
     -- module verified in-file composes like a file family. Best-effort;
     -- one summary message.
     emitPreservationLemmas stx mod.name
+    -- `<property>_step` for every `step_property`: the property over every
+    -- label, assembled from the persisted step cells (silent when the module
+    -- has no step properties).
+    emitStepLemmas stx mod.name
 
 end Veil
