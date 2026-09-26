@@ -229,6 +229,22 @@ register_option veil.smt.retryTimeout : Nat := {
   Must be set before `#gen_spec`."
 }
 
+register_option veil.smt.foldBoolAtoms : Bool := {
+  defValue := true
+  descr := "If true (default), `veil_smt` in reconstruction mode \
+  (`veil.smt.trust false`) folds every `f a⃗ = true` atom over a local \
+  `Bool`-valued function variable into an application of a fresh opaque \
+  `Prop`-valued local definition (`f' := fun a⃗ => f a⃗ = true`) before \
+  building the SMT query. The fold is definitional (`change`-based, zero \
+  proof-term mass) and removes every `Bool` from the hypotheses and goal, \
+  so lean-smt's `embedding` preprocessing pass short-circuits instead of \
+  re-proving the Bool→Prop embedding of the whole hypothesis telescope per \
+  VC — measured 65–72% of every reconstruction witness on a large case \
+  study. The resulting query has the same shape the \
+  embedding pass would have produced (opaque `Prop` predicates). \
+  Trusted-mode queries (`veil.smt.trust true`) are never changed."
+}
+
 register_option veil.gen.strictLocalSimp : Bool := {
   defValue := true
   descr := "If true (default), failing to synthesize the local \
