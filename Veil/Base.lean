@@ -138,18 +138,27 @@ register_option veil.solver : VeilSolver := {
 register_option veil.smt.finiteModelFind : Bool := {
   defValue := true
   descr := "If true, the SMT solver will use finite model finding mode (finite-model-find). \
-  If you work in a decidable fragment, this will tend to speed things up."
+  If you work in a decidable fragment, this will tend to speed things up. \
+  NOTE: dischargers capture solver options at `#gen_spec` (VC generation), \
+  so this must be set before `#gen_spec`; setting it only around a check \
+  command has no effect on solving."
 }
 
 register_option veil.smt.trust : Bool := {
   defValue := true
   descr := "If true, `veil_smt` trusts unsat results from the SMT solver. \
-  If false, `veil_smt` asks the SMT backend to reconstruct Lean proofs."
+  If false, `veil_smt` asks the SMT backend to reconstruct Lean proofs. \
+  NOTE: dischargers capture solver options at `#gen_spec` (VC generation), \
+  so this must be set before `#gen_spec`; setting it only around a check \
+  command has no effect on solving."
 }
 
 register_option veil.smt.timeout : Nat := {
   defValue := 60
-  descr := "Timeout for the SMT solver in seconds. Default is 60 seconds."
+  descr := "Timeout for the SMT solver in seconds. Default is 60 seconds. \
+  NOTE: dischargers capture solver options at `#gen_spec` (VC generation), \
+  so this must be set before `#gen_spec`; setting it only around a check \
+  command has no effect on solving."
 }
 
 register_option veil.smt.seed : Nat := {
@@ -157,7 +166,8 @@ register_option veil.smt.seed : Nat := {
   descr := "Random seed for the SMT solver (cvc5 `seed` and `sat-random-seed`). \
   0 (the default) leaves the solver's own default seed in place; any other \
   value is passed through. Retry attempts (`veil.smt.retries`) perturb this \
-  to escape seed-dependent e-matching divergence."
+  to escape seed-dependent e-matching divergence. Like all solver options, \
+  must be set before `#gen_spec`."
 }
 
 register_option veil.smt.retries : Nat := {
@@ -177,6 +187,19 @@ register_option veil.smt.retryTimeout : Nat := {
   quickly under a fresh seed or never, so a short budget avoids burning \
   another full `veil.smt.timeout` on genuinely divergent queries. \
   Must be set before `#gen_spec`."
+}
+
+register_option veil.gen.strictLocalSimp : Bool := {
+  defValue := true
+  descr := "If true (default), failing to synthesize the local \
+  pre-simplification infrastructure (LocalTheoryProp/LocalRProp simplified \
+  cores and the local `meetsSpecificationIfSuccessful` theorems) at \
+  `#gen_spec` is a hard error. Without this infrastructure every VC \
+  re-simplifies the full assembled assertion clump from scratch, silently \
+  degrading `#check_invariants` roughly 10x on large modules; the failure is \
+  usually instance-search budget exhaustion, fixed by raising \
+  `synthInstance.maxHeartbeats`/`synthInstance.maxSize`/`maxRecDepth`. \
+  Set to false to restore the old warn-and-continue behavior."
 }
 
 register_option veil.report.slowVCs : Nat := {
