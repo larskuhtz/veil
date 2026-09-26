@@ -551,11 +551,13 @@ private def emitInitLemma (ctx : LemmaContext) (f : Name) (sc : StateComponent) 
   addStepTheorem (fieldInitLemmaName f) binders mkStmt proof
 
 /-- Run one emission; a failure after a positive verdict is a warning (it is
-a defect of the proof script, not a property of the model). -/
-private def attempt (name : Name) (k : CommandElabM Unit) : CommandElabM Bool := do
+a defect of the proof script, not a property of the model). The lemmas are
+elaborated under `ref` — the user declaration they are about — which is
+what their declaration ranges record (see `addVeilDeclarationRanges`). -/
+private def attempt (name : Name) (ref : Syntax) (k : CommandElabM Unit) : CommandElabM Bool := do
   let saved := (← get).messages
   try
-    k
+    withRef ref k
     trace[veil.stepLemmas] "emitted `{name}`"
     return true
   catch e =>
@@ -605,7 +607,7 @@ def Module.emitStepLemmas (mod : Module) : CommandElabM Unit := do
     -- usable (the monotonicity lemmas start from the exposed body too).
     let framed := (Array.range ctx.fields.size).filter fun i =>
       writes.frame[i]! && ctx.comps[i]!.isSome
-    unless ← attempt (stepFrameBundleName act.name)
+    unless ← attempt (stepFrameBundleName act.name) act.userSyntax
         (emitActionFrames ctx act.name actualParams (framed.map (ctx.fields[·]!))) do
       complete := false
       continue
@@ -618,7 +620,7 @@ def Module.emitStepLemmas (mod : Module) : CommandElabM Unit := do
       if writes.frame[i]! then
         kinds := kinds.push (some true)
       else if writes.mono[i]! then
-        let ok ← attempt (stepMonoLemmaName act.name f) (emitMonoLemma ctx act.name actualParams f sc)
+        let ok ← attempt (stepMonoLemmaName act.name f) act.userSyntax (emitMonoLemma ctx act.name actualParams f sc)
         if ok then nMono := nMono + 1
         kinds := kinds.push (if ok then some false else none)
       else
@@ -633,7 +635,7 @@ def Module.emitStepLemmas (mod : Module) : CommandElabM Unit := do
       let verdicts := perAction.map fun (a, ks) => (a, ks[i]!)
       if verdicts.all (·.2.isSome) && verdicts.any (·.2 == some false) then
         let kinds := verdicts.map fun (a, k) => (a, k.getD true)
-        if ← attempt (fieldMonoLemmaName f) (emitFieldMonoLemma ctx f sc kinds) then
+        if ← attempt (fieldMonoLemmaName f) sc.userSyntax (emitFieldMonoLemma ctx f sc kinds) then
           nFieldMono := nFieldMono + 1
   -- Initial values.
   let inits ← try
@@ -646,7 +648,7 @@ def Module.emitStepLemmas (mod : Module) : CommandElabM Unit := do
     let some v := inits[i]!
       | trace[veil.stepLemmas] "initializer / `{f}`: not a single closed-literal write, no lemma"
         continue
-    if ← attempt (fieldInitLemmaName f) (emitInitLemma ctx f sc v) then
+    if ← attempt (fieldInitLemmaName f) sc.userSyntax (emitInitLemma ctx f sc v) then
       nInit := nInit + 1
   let dt := (← IO.monoMsNow) - t0
   trace[veil.stepLemmas] "`{mod.name}`: {nFrame} frame, {nMono} monotonicity, {nFieldMono} \
