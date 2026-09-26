@@ -369,27 +369,6 @@ register_option veil.lazyWitnessRegen : Bool := {
   cost dominates the memory savings."
 }
 
-register_option veil.gen.statementOnlyTheorems : Bool := {
-  defValue := false
-  descr := "If true, `#gen_theorems` persists statement-only stubs (a \
-  `sorryAx` of each VC statement) instead of proofs — and does so \
-  SOLVE-FREE: it neither starts nor awaits any discharger, since the \
-  statements exist from `#gen_spec`'s SMT-free VC generation and a stub \
-  carries no verification claim (both the WP and TR encodings of every \
-  cell are stubbed; VCs a preceding check command terminally failed are \
-  skipped). This is a compatibility mode: the preferred statement carrier \
-  is the claim-free VC registry (`veil.gen.vcRegistry`), which importing \
-  files can re-prove for real (`#prove_action`). Historical note: \
-  previously this mode awaited the full sweep and \
-  stubbed exactly the proven VCs, so a stub certified a checked-then- \
-  discarded proof — that reading is dead, a stub now certifies nothing. \
-  Downstream axiom pins over stubs show `sorryAx`; anything real must be \
-  re-proven from the registry. Mutually exclusive with \
-  `veil.gen.streamTheorems` in intent (retention is pointless when only \
-  statements are persisted), and rejected by `#prove_action` (a \
-  proof-persistence command must never emit stubs)."
-}
-
 register_option veil.gen.streamTheorems : Bool := {
   defValue := false
   descr := "If true, dischargers retain their full proof witness after a \
@@ -397,15 +376,12 @@ register_option veil.gen.streamTheorems : Bool := {
   that `#gen_theorems` can persist each proven VC incrementally — while the \
   sweep is still running — and release the witness immediately after adding \
   its theorem to the environment. This is the scalable persistence mode for \
-  proof-reconstruction runs (`veil.smt.trust false`), where the trusted-stub \
-  fast path (`veil.gen.trustedTheoremStubs`) does not apply and lazy witness \
+  proof-reconstruction runs (`veil.smt.trust false`), where lazy witness \
   regeneration would re-run every proof reconstruction serially after the \
   sweep. Like all discharger behavior, retention is captured at `#gen_spec` — \
   set this option before `#gen_spec`, and only in modules that run \
   `#gen_theorems` (without it, retained witnesses are never released and \
-  peak memory grows by the total witness mass). Inert under \
-  `veil.smt.trust = true`: trusted witnesses are persisted as statement-only \
-  stubs and are never retained in full."
+  peak memory grows by the total witness mass)."
 }
 
 register_option veil.cache.proofs : Bool := {
@@ -472,22 +448,6 @@ register_option veil.cache.kernelReplay : Bool := {
   suffix, so the unreachable-/unused-tactic linters flag it — set \
   `linter.unreachableTactic`/`linter.unusedTactic` to false in files that \
   expect hits."
-}
-
-register_option veil.gen.trustedTheoremStubs : Bool := {
-  defValue := true
-  descr := "If true (default), `#gen_theorems` persists a VC theorem whose \
-  discharge was trusted-SMT-based (`veil.smt.trust = true`, witness contains \
-  `sorryAx`) as a direct `sorryAx` of the VC statement, instead of \
-  re-elaborating the discharger (lazy witness regeneration — a second, \
-  serial SMT run per VC) or retaining the full `Eq.mpr` normalisation chain \
-  (~100 KB–10 MB per VC). The trust base is unchanged — the chain's leaf is \
-  the same axiom — but memory and olean cost become O(statement) per \
-  theorem, which is what lets `#gen_theorems` scale to large modules under \
-  trust mode. Proof-reconstruction runs (`veil.smt.trust = false`) are \
-  unaffected: their witnesses contain no `sorryAx` and are materialised in \
-  full as before. Set to false to restore the previous behavior (full \
-  witness even under trust mode)."
 }
 
 end Veil

@@ -753,15 +753,6 @@ def elabProveAction : CommandElab := fun stx => do
     if ← isNoVerifyMode then
       logWarningAt stx m!"⏭ #prove_action skipped (veil.noVerify): no proofs were persisted"
       return
-    -- `#prove_action` is a proof-persistence command: its green output means
-    -- "real, kernel-checked theorems exist now". Under
-    -- `veil.gen.statementOnlyTheorems` the persistence pass would silently
-    -- write `sorryAx` stubs instead — refuse rather than look proven.
-    if veil.gen.statementOnlyTheorems.get (← getOptions) then
-      throwErrorAt stx "#prove_action persists real, kernel-checked proofs; \
-        `veil.gen.statementOnlyTheorems` would make it persist `sorryAx` \
-        stubs instead. Unset the option — statements are already carried, \
-        claim-free, by the VC registry (`veil.gen.vcRegistry`)."
     let modName := stx[1].getId
     let actionName := stx[2].getId
     throwIfInsideDefiningModule modName
@@ -1149,14 +1140,6 @@ def elabGenTheorems : CommandElab := fun stx => do
       return
     let mod ← getCurrentModule (errMsg := "You cannot #gen_theorems outside of a Veil module!")
     mod.throwIfSpecNotFinalized
-    -- Statement-only persistence is solve-free:
-    -- the statements exist from `#gen_spec`'s SMT-free VC generation, and a
-    -- stub carries no claim — so this mode neither starts nor awaits the
-    -- sweep. (It used to `waitFilteredSync` first, i.e. even statement-only
-    -- persistence paid — and in a model-only file, triggered — a full solve.)
-    if veil.gen.statementOnlyTheorems.get (← getOptions) then
-      Verifier.addStatementStubs (fun _ => true)
-      return
     -- `#gen_theorems` may be the first command to start the dischargers.
     checkModuleSolverHypotheses stx mod
     -- UX guard: witness retention (`veil.gen.streamTheorems`) is discharger

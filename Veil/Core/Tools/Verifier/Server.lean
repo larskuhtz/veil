@@ -276,51 +276,23 @@ private def addProvenVCTheorem (vc : VerificationCondition VCMetadata SmtResult)
   if (← getEnv).contains fullName then
     liftTermElabM do ensureExistingTheoremMatches fullName (← vc.toVCStatement.type)
     return
-  -- TRUSTED-STUB FAST PATH (`veil.gen.trustedTheoremStubs`, default true).
-  -- When the discharge was trusted-SMT-based, the stored witness slot carries
-  -- `sorryAx` — under lazy regen it is exactly the 1-node sentinel, and
-  -- without lazy regen it is the full `Eq.mpr` normalisation chain whose
-  -- *leaf* is the axiom. Either way the real proof's trust base is the
-  -- trusted axiom, so persisting `sorryAx <statement>` directly is
-  -- trust-equivalent — and skips both failure modes of witness
-  -- materialisation at scale: the serial re-elaboration of the regen
-  -- closure (a second SMT run per VC) and the O(action × clump) chain in
-  -- memory/olean. Reconstruction runs (`veil.smt.trust = false`) never take
-  -- this path: their witnesses contain no `sorryAx`.
-  let statementOnly := veil.gen.statementOnlyTheorems.get (← getOptions)
-  let useTrustedStub :=
-    statementOnly ||
-    (veil.gen.trustedTheoremStubs.get (← getOptions) && witness?.any (·.hasSorry))
   -- Resolve the witness. A *sorry-free* stored witness is a real proof (eager
   -- retention, streaming persistence, or an interactive `@[veil]` theorem) —
   -- use it directly, never re-elaborate. A stored witness containing `sorryAx`
   -- is either the 1-node lazy-regen sentinel (regen closure present:
   -- materialise the real witness) or a full eager trust-mode chain (no regen
   -- closure: the chain itself is the proof).
-  let witness? : Option Witness ←
-    if useTrustedStub then
-      pure none  -- constructed below, from the statement
-    else some <$> match witness?, regen? with
-      | some w, some regen => if w.hasSorry then regen else pure w
-      | some w, none => pure w
-      | none, some regen => regen
-      | none, none => throwError "no witness and no regeneration closure for VC `{vc.name}`"
-  -- Under `veil.gen.statementOnlyTheorems` every stub is a deliberate,
-  -- option-gated choice: a per-declaration "declaration uses `sorry`"
-  -- warning ×N (thousands of lines on a ~3800-VC module) is pure noise, and the batch
-  -- pass logs one summary instead. `veil.gen.trustedTheoremStubs` behavior
-  -- is deliberately unchanged.
-  let suppressSorryWarning : TermElabM Unit → TermElabM Unit :=
-    if statementOnly then (withOptions (warn.sorry.set · false) ·) else id
-  liftTermElabM <| suppressSorryWarning do
+  let witness : Witness ← match witness?, regen? with
+    | some w, some regen => if w.hasSorry then regen else pure w
+    | some w, none => pure w
+    | none, some regen => regen
+    | none, none => throwError "no witness and no regeneration closure for VC `{vc.name}`"
+  liftTermElabM do
     let statement ← vc.toVCStatement.type
-    let witness ← match witness? with
-      | some w => do
-        let w ← instantiateMVars w
-        -- Collapse cross-witness structural duplication before the proof
-        -- enters the environment (see `witnessShareState`).
-        witnessShareState.modifyGet fun s => s.shareCommon w
-      | none => Meta.mkSorry statement (synthetic := false)
+    let witness ← instantiateMVars witness
+    -- Collapse cross-witness structural duplication before the proof
+    -- enters the environment (see `witnessShareState`).
+    let witness ← witnessShareState.modifyGet fun s => s.shareCommon witness
     let _ ← addVeilTheorem vc.name statement witness
     return ()
 
@@ -376,7 +348,6 @@ private def persistProvenIncrementally (filter : VCMetadata → Bool)
   let recorded := mgr.recordedResultCount
   if !force && recorded == state.seenResults then
     return state
-  let stubsOn := veil.gen.trustedTheoremStubs.get (← getOptions)
   let order := mgr.vcIdsInDependencyOrder filter
   let orderSet := order.foldl (init := (∅ : Std.HashSet VCId)) (·.insert ·)
   let mut settled := state.settled
@@ -389,10 +360,9 @@ private def persistProvenIncrementally (filter : VCMetadata → Bool)
     | some .proven =>
       match mgr.provenWitnessOrRegen? vcId with
       | some (vc, (some w, regen?)) =>
-        -- A retained `sorryAx` witness persists as a statement-only stub
-        -- (free) only when stubs are on; otherwise persisting it would
-        -- regenerate — leave that to the batch pass.
-        if !w.hasSorry || stubsOn then
+        -- Persisting a retained `sorryAx` witness would regenerate — leave
+        -- that to the batch pass.
+        if !w.hasSorry then
           addProvenVCTheorem vc (some w) regen?
           vcManager.atomically fun ref => do
             let cur ← ref.get
@@ -512,10 +482,7 @@ def addProvenTheoremsInDependencyOrder (filter : VCMetadata → Bool) : CommandE
   -- stragglers" (fine) from "the whole module" (the misconfiguration).
   let ns ← getCurrNamespace
   let env ← getEnv
-  -- With statement-only persistence the stub path short-circuits before
-  -- witness resolution — no regeneration will run, so no warning.
-  let statementOnly := veil.gen.statementOnlyTheorems.get (← getOptions)
-  let regenCount : Nat := if statementOnly then 0 else
+  let regenCount : Nat :=
     mgr.vcIdsInDependencyOrder filter |>.foldl (init := 0) fun n vcId =>
       match mgr.provenWitnessOrRegen? vcId with
       | some (vc, (none, some _)) => if env.contains (ns.append vc.name) then n else n + 1
@@ -529,72 +496,8 @@ def addProvenTheoremsInDependencyOrder (filter : VCMetadata → Bool) : CommandE
       `veil.gen.streamTheorems true` before `#gen_spec` instead: dischargers \
       then retain their witnesses and `#gen_theorems` persists each one \
       incrementally while the sweep is still running."
-  let mut persisted : Nat := 0
   for vcId in mgr.vcIdsInDependencyOrder filter do
     if let some (vc, (witness?, regen?)) := mgr.provenWitnessOrRegen? vcId then
       addProvenVCTheorem vc witness? regen?
-      persisted := persisted + 1
-  -- One summary instead of a per-declaration "uses `sorry`" warning ×N
-  -- (suppressed in `addProvenVCTheorem` for this deliberate, option-gated
-  -- mode).
-  if statementOnly && persisted > 0 then
-    let checked := if veil.smt.trust.get (← getOptions) then "checked by the solver"
-      else "reconstructed and kernel-checked (`veil.smt.trust false`)"
-    logInfo m!"persisted {persisted} VC theorems as statement-only `sorryAx` \
-      stubs (`veil.gen.statementOnlyTheorems`): their proofs were {checked} \
-      during the sweep, then discarded."
-
-/-- Solve-free statement-stub pass — the `veil.gen.statementOnlyTheorems`
-path of `#gen_theorems`: persist every generated
-induction VC matching `filter` as a statement-only `sorryAx` stub *without
-starting or awaiting any discharger*. The statements exist from `#gen_spec`'s
-SMT-free VC generation, and a stub carries no verification claim — so nothing
-needs solving to emit one. Consequences of solve-freedom:
-
-* **Both encodings of a cell are stubbed** (the WP and TR forms are distinct
-  statements under distinct names, `<action>_<prop>` / `<action>_<prop>_tr`) —
-  there is no "which form proved" fact to select by, and neither stub claims
-  anything.
-* VCs that already reached a terminal non-proven status (a check command ran
-  earlier in this file and the VC failed: ❌/💥/⏱/❓) are deliberately NOT
-  stubbed — a theorem-shaped constant for a known-failed VC invites accidental
-  reliance — and are counted in the summary instead.
-* Trace VCs are skipped, as in the proven-theorem batch pass.
-
-The summary reports how many stubs had in fact been proven by the time of
-emission, but that count is incidental (e.g. the sweep a preceding
-`#check_invariants` ran) — the stubs themselves never certify a sweep. Must
-run under `veil.gen.statementOnlyTheorems` (it drives the stub path of
-`addProvenVCTheorem`). -/
-def addStatementStubs (filter : VCMetadata → Bool) : CommandElabM Unit := do
-  unless veil.gen.statementOnlyTheorems.get (← getOptions) do
-    throwError "addStatementStubs requires `veil.gen.statementOnlyTheorems`"
-  let mgr ← vcManager.atomically fun ref => ref.get
-  let vcs := mgr.nodes.values.toArray.qsort (·.uid < ·.uid)
-  let mut stubbed : Nat := 0
-  let mut proven : Nat := 0
-  let mut skippedFailed : Nat := 0
-  for vc in vcs do
-    unless vc.metadata matches .induction _ do continue
-    unless filter vc.metadata do continue
-    match mgr.vcFinalStatus? vc.uid with
-    | some .proven =>
-      addProvenVCTheorem vc none none
-      stubbed := stubbed + 1
-      proven := proven + 1
-    | some _ => skippedFailed := skippedFailed + 1
-    | none =>
-      addProvenVCTheorem vc none none
-      stubbed := stubbed + 1
-  let mut msg := m!"persisted {stubbed} VC statements as statement-only \
-    `sorryAx` stubs (`veil.gen.statementOnlyTheorems`) — solve-free: a stub \
-    carries no verification claim"
-  if proven > 0 then
-    msg := msg ++ m!" ({proven} of them happened to be proven by this file's \
-      sweep at emission time; the stubs do not record that)"
-  if skippedFailed > 0 then
-    msg := msg ++ m!"; {skippedFailed} VCs with a non-proven terminal status \
-      were not stubbed"
-  logInfo msg
 
 end Veil.Verifier
