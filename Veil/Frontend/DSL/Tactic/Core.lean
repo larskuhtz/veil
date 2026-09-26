@@ -689,6 +689,13 @@ def elabVeilConcretizeFieldsWp (fast : Bool) : DesugarTacticM Unit := veilWithMa
   let fields ← getFieldIdentsForStruct stateTypeName
   let mut tacs : Array (TSyntax `Lean.Parser.Tactic.tacticSeq) := #[]
   let localSimpTerms := #[fieldLabelToDomain stateName, fieldLabelToCodomain stateName]
+  -- Also unfold a concretized field's type `CanonicalField doms cod` to its
+  -- arrow `d₁ → … → cod` (`cod` when `doms = []`). `IteratedArrow` is a
+  -- recursive definition, so the default simp set does not reduce it (it did
+  -- while it was an `abbrev` over `List.foldr`); left folded, the SMT
+  -- translation rejects the field ("cannot translate Type", or a malformed
+  -- sort), and `smtSimp` does not turn a `Bool`-valued field into a predicate.
+  let generalizeSimpTerms := localSimpTerms ++ #[mkIdent ``IteratedArrow, mkIdent ``CanonicalField]
   if !fast then
     -- (1) do basic simplification using `LawfulFieldRepresentation`
     tacs := tacs.push <| ← `(tacticSeq| veil_simp +$(mkIdent `instances) only [$(mkIdent `fieldRepresentationSetSimpPre):ident])
@@ -706,7 +713,7 @@ def elabVeilConcretizeFieldsWp (fast : Bool) : DesugarTacticM Unit := veilWithMa
       let f : Ident := f
       let fDestructed := mkIdent <| Name.append st.getId f.getId -- Name.mkSimple s!"{st.getId}_{f.getId}"
       let tmpField := mkIdent <| mkVeilImplementationDetailName f.getId
-      tacs := tacs.push <| ← `(tacticSeq| generalize (($rep _).$(mkIdent `get)) $st.$f = $tmpField at * ; dsimp +$(mkIdent `instances) [$[$localSimpTerms:ident],*] at $tmpField:ident ; veil_rename_hyp $tmpField:ident => $fDestructed:ident)
+      tacs := tacs.push <| ← `(tacticSeq| generalize (($rep _).$(mkIdent `get)) $st.$f = $tmpField at * ; dsimp +$(mkIdent `instances) [$[$generalizeSimpTerms:ident],*] at $tmpField:ident ; veil_rename_hyp $tmpField:ident => $fDestructed:ident)
     -- Clear the original state hypothesis
     tacs := tacs.push <| ← `(tacticSeq| try clear $st:ident)
   for t in tacs do
