@@ -29,7 +29,6 @@ too. A dedicated directory keeps these entries away from other tests. -/
 set_option linter.unusedVariables false
 set_option veil.cache.dir ".lake/build/veilcache-manualcell"
 set_option linter.unreachableTactic false
-set_option linter.unusedTactic false
 
 open Veil RegRing
 

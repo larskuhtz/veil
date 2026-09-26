@@ -316,10 +316,10 @@ private def Module.ensureExecutableModelCheckerDefinitions (mod : Module) : Comm
   -- The EnumerableTransitionSystem (and the `Enumeration`/`FinEncodableInjOnly`
   -- `Label` instances it consumes) are only generated when
   -- `veil.gen.modelCheckScaffolding` is enabled. With it off, `#model_check`
-  -- is unavailable by design; fail with a clear message rather than a
-  -- confusing missing-instance error from `assembleEnumerableTransitionSystem`.
+  -- and `#simulate` are unavailable by design; fail with a clear message rather
+  -- than a confusing missing-instance error from `assembleEnumerableTransitionSystem`.
   unless (← isModelCheckScaffoldingEnabled) do
-    throwError "`#model_check` requires `veil.gen.modelCheckScaffolding` (currently false). \
+    throwError "`#model_check` and `#simulate` require `veil.gen.modelCheckScaffolding` (currently false). \
       Re-enable it to generate the EnumerableTransitionSystem. `#check_invariants` \
       and `#check_action` do not require it."
   if (← getEnv).contains (mod.name ++ enumerableTransitionSystemName) then
@@ -1401,6 +1401,9 @@ private def elabSimulateWithHandoff (mod : Module) (stx : Syntax) (callExpr : Te
 @[command_elab Veil.simulate]
 def elabSimulate : CommandElab := fun stx => do
   withTraceNode `veil.perf.elaborator.simulate (fun _ => return "#simulate") do
+    if ← isNoVerifyMode then
+      logWarningAt stx m!"⏭ #simulate skipped (veil.noVerify)"
+      return
     let mode := getModelCheckingMode stx[1]
     let instTerm : Term := ⟨stx[2]⟩
     let theoryTermOpt : Option Term := if stx[3].isNone then none else some ⟨stx[3][0]⟩

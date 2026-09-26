@@ -456,7 +456,8 @@ register_option veil.cache.kernelReplay : Bool := {
   there); for in-file sweeps set it before `#gen_spec`. Note: a \
   command-level replay hit never elaborates the command's `by <tac>` \
   suffix, so the unreachable-/unused-tactic linters flag it — set \
-  `linter.unreachableTactic`/`linter.unusedTactic` to false in files that \
+  `linter.unreachableTactic` (and, where Mathlib is loaded, `linter.unusedTactic`) \
+  to false in files that \
   expect hits."
 }
 

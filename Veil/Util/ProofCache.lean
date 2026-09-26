@@ -1,6 +1,10 @@
-import Lean
-import Batteries.Util.Pickle
-import Veil.Base
+module
+
+public meta import Lean
+public meta import Batteries.Util.Pickle
+public meta import Veil.Base
+
+public meta section
 
 /-! # Content-addressed proof cache (`veil.cache.proofs`)
 

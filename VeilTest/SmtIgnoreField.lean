@@ -75,7 +75,7 @@ invariant [prefix_agreement_usable]
 
 /--
 error: the `Prop` field `SIOrchLive.totality` of instantiated class `SIOrchLive` is not first-order: it binds
-  run : ℕ → ostate
+  run : Nat → ostate
 which the SMT translation cannot express. Every axiom of an instantiated class is a solver hypothesis, so this would fail every verification condition of module `SmtIgnoreFieldError` with an opaque solver error. Restate the field in the first-order fragment, or withhold it from the solver with
   attribute [veil_smt_ignore] SIOrchLive.totality
 after the class: it stays a declared axiom of the class, and the check commands list every withheld field of a module.

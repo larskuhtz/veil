@@ -1,5 +1,9 @@
-import Lean
-import Veil.Base
+module
+
+public meta import Lean
+public meta import Veil.Base
+
+public meta section
 
 /-! # Cheap-rung counters (`veil.vc.cheapRung`)
 

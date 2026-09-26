@@ -1,4 +1,6 @@
-import Veil
+module
+
+public import Veil
 
 /-! # Cross-file solver-hypothesis check — the defining module
 
@@ -9,6 +11,8 @@ runs the cross-file check commands over it. -/
 
 set_option linter.unusedVariables false
 set_option veil.gen.vcRegistry true
+
+public section
 
 class SIRegOrch (validator slot state : Type) where
   init      : state
@@ -23,6 +27,8 @@ class SIRegOrch (validator slot state : Type) where
     ∀ i j s, ¬ byz i → ¬ byz j → (∃ n, opened (run n) i s) → ∃ m, opened (run m) j s
 
 attribute [veil_smt_ignore] SIRegOrch.totality
+
+end
 
 veil module SIRegMod
 

@@ -1,11 +1,15 @@
-import Mathlib.Tactic.CasesM
-import Mathlib.Tactic.SplitIfs
-import Veil.Frontend.DSL.Util
-import Veil.Frontend.DSL.Module.Names
-import Veil.Frontend.DSL.Module.Util
-import Veil.Frontend.DSL.Infra.EnvExtensions
-import Veil.Frontend.DSL.State.SubState
-import Veil.Frontend.DSL.State.Interface
+module
+
+public meta import Veil.Util.UnhygienicCasesM
+public meta import Veil.Util.SplitIfs
+public meta import Veil.Frontend.DSL.Util
+public meta import Veil.Frontend.DSL.Module.Names
+public meta import Veil.Frontend.DSL.Module.Util
+public meta import Veil.Frontend.DSL.Infra.EnvExtensions
+public meta import Veil.Frontend.DSL.State.SubState
+public meta import Veil.Frontend.DSL.State.Interface
+
+public meta section
 
 /-! # Generated step lemmas
 
@@ -57,6 +61,22 @@ the script rather than a property of the model. -/
 open Lean Elab Command Term Meta
 
 namespace Veil
+
+/-- Destruct every `∧` / `∃` hypothesis, recursively. Replaces Mathlib's
+`casesm* _ ∧ _, ∃ _, _` (Veil no longer depends on Mathlib). Unlike
+`veil_cases_type`, the match instantiates metavariables and looks through
+reducible definitions first: the transition hypothesis produced by
+`replace h := <action>.tr_of_step h` carries assigned-but-uninstantiated
+metavariables, which a purely syntactic head check does not see through. -/
+syntax (name := veilStepDestruct) "__veil_step_destruct" : tactic
+
+@[tactic veilStepDestruct]
+def elabVeilStepDestruct : Tactic.Tactic := fun _ =>
+  Tactic.liftMetaTactic fun g => do
+    let matcher (ty : Expr) : MetaM (Option Unit) := do
+      let ty ← whnfR (← instantiateMVars ty)
+      return if ty.isAppOfArity ``And 2 || ty.isAppOfArity ``Exists 2 then some () else none
+    Veil.Util.casesMatching matcher (fun _ => pure #[]) (recursive := true) (g := g)
 
 /-- Whether `#gen_spec` derives the step lemmas (`veil.gen.stepLemmas`). -/
 def isStepLemmasEnabled [Monad m] [MonadOptions m] : m Bool := do
@@ -353,9 +373,11 @@ private def exposeTac (ctx : LemmaContext) (act : Name) : CommandElabM (TSyntax 
   let lem := mkIdent (stepExposureLemmaName act)
   `(tactic| replace $(ctx.h):ident := $lem:ident $(ctx.h):ident)
 
-/-- Walk the body to its post-state leaves (each substitutes the post-state). -/
+/-- Walk the body to its post-state leaves (each substitutes the post-state).
+The trailing `simp` closes the branches of a failed `require`/`pick`, whose
+leaf is `¬True` (Mathlib's `split_ifs` used to close them itself). -/
 private def destructTac : CommandElabM (TSyntax `tactic) :=
-  `(tactic| repeat' (first | casesm* _ ∧ _, ∃ _, _ | split_ifs at *))
+  `(tactic| (repeat' (first | __veil_step_destruct | split_ifs at *)) <;> try simp only [$(mkIdent ``not_true_eq_false):ident] at *)
 
 /-- Close a monotonicity/initial-value goal at the canonical representation.
 Goal-directed (`simp` on the goal with the given facts), because

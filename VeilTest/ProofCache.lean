@@ -23,7 +23,6 @@ set_option veil.cache.dir ".lake/build/veilcache-test"
 -- A command-level replay hit never elaborates the `by <tac>` suffix — the
 -- unreachable-/unused-tactic linters would flag it (by design here).
 set_option linter.unreachableTactic false
-set_option linter.unusedTactic false
 
 open Veil RegRing
 

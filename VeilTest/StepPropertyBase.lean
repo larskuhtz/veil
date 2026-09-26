@@ -1,4 +1,6 @@
-import Veil
+module
+
+public import Veil
 
 /-! # `step_property` registry test — the defining module
 

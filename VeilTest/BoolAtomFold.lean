@@ -76,7 +76,6 @@ structural nodes with it). -/
 open Veil FoldRing
 
 set_option linter.unreachableTactic false
-set_option linter.unusedTactic false
 -- fresh solve, so the witness below reflects the fold (a cache hit would
 -- replay whatever an earlier build stored)
 set_option veil.cache.proofs false

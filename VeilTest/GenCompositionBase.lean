@@ -1,4 +1,6 @@
-import Veil
+module
+
+public import Veil
 
 /-! # `#gen_composition` test — the defining module
 

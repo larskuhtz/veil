@@ -1,9 +1,13 @@
-import Veil.Frontend.DSL.Util
-import Veil.Frontend.DSL.Module.Names
-import Veil.Frontend.DSL.Module.Syntax
-import Veil.Frontend.DSL.Infra.EnvExtensions
-import Veil.Frontend.DSL.Action.Semantics.Theorems
-import Veil.Core.Tools.ModelChecker.TransitionSystem
+module
+
+public meta import Veil.Frontend.DSL.Util
+public meta import Veil.Frontend.DSL.Module.Names
+public meta import Veil.Frontend.DSL.Module.Syntax
+public meta import Veil.Frontend.DSL.Infra.EnvExtensions
+public meta import Veil.Frontend.DSL.Action.Semantics.Theorems
+public meta import Veil.Core.Tools.ModelChecker.TransitionSystem
+
+public meta section
 
 /-! # Composition emission
 
@@ -793,7 +797,6 @@ set_option veil.cache.proofs true
 -- command level and never elaborates the `by` suffix; the unreachable-/
 -- unused-tactic linters would flag that (by design here).
 set_option linter.unreachableTactic false
-set_option linter.unusedTactic false
 
 namespace {modName}.Proofs
 

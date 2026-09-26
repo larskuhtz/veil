@@ -39,7 +39,6 @@ set_option veil.cache.kernelReplay false
 -- unreachable-/unused-tactic linters would flag it (correctly, but by
 -- design here).
 set_option linter.unreachableTactic false
-set_option linter.unusedTactic false
 
 open Lean Veil RegRing
 
@@ -103,7 +102,7 @@ end PoisonIllTyped
 -- below is the actual assertion.
 #eval (do
   let stmt ← cellStatement
-  poisonWith (mkApp2 (mkConst ``sorryAx [levelZero]) stmt (mkConst ``Bool.false))
+  poisonWith (mkApp2 (mkConst ``sorryAx [Level.zero]) stmt (mkConst ``Bool.false))
   : Lean.Elab.TermElabM Unit)
 
 namespace PoisonSorry

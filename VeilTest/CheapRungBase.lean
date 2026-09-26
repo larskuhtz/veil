@@ -1,4 +1,6 @@
-import Veil
+module
+
+public import Veil
 
 /-! # Cheap non-SMT discharger rung (`veil.vc.cheapRung`) — the model
 

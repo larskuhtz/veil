@@ -753,7 +753,7 @@ def elabVeilConcretizeStateTr : DesugarTacticM Unit := veilWithMainContext do
 Note that even parts of the simplication have been done during WP
 generation, it might still be necessary here since the post-condition
 might contain `get` and we need to use laws to eliminate `get (set ...)`. -/
-def elabVeilConcretizeFieldsWp (fast : Bool) : DesugarTacticM Unit := veilWithMainContext do
+def elabVeilConcretizeFieldsWp (fast : Bool) (unfoldArrows : Bool := false) : DesugarTacticM Unit := veilWithMainContext do
   -- TODO how to eliminate the code repetition wrt. the WP generation?
   let lctx ← getLCtx
   let some hyp := lctx.findDecl? (fun decl =>
@@ -774,6 +774,15 @@ def elabVeilConcretizeFieldsWp (fast : Bool) : DesugarTacticM Unit := veilWithMa
   let fields ← getFieldIdentsForStruct stateTypeName
   let mut tacs : Array (TSyntax `Lean.Parser.Tactic.tacticSeq) := #[]
   let localSimpTerms := #[fieldLabelToDomain stateName, fieldLabelToCodomain stateName]
+  -- `unfoldArrows` (the transition route): also unfold the concretized field
+  -- type `CanonicalField doms cod` to its arrow `d₁ → … → cod`. `IteratedArrow`
+  -- is a recursive definition, so the default simp set does not reduce it
+  -- (it did while it was an `abbrev` over `List.foldr`), and the final
+  -- `smtSimp` pass only turns `Bool`-valued fields into predicates when their
+  -- type is literally an arrow into `Bool`.
+  let generalizeSimpTerms := if unfoldArrows
+    then localSimpTerms ++ #[mkIdent ``IteratedArrow, mkIdent ``CanonicalField]
+    else localSimpTerms
   if !fast then
     -- (1) do basic simplification using `LawfulFieldRepresentation`
     tacs := tacs.push <| ← `(tacticSeq| veil_simp +$(mkIdent `instances) only [$(mkIdent `fieldRepresentationSetSimpPre):ident])
@@ -791,7 +800,7 @@ def elabVeilConcretizeFieldsWp (fast : Bool) : DesugarTacticM Unit := veilWithMa
       let f : Ident := f
       let fDestructed := mkIdent <| Name.append st.getId f.getId -- Name.mkSimple s!"{st.getId}_{f.getId}"
       let tmpField := mkIdent <| mkVeilImplementationDetailName f.getId
-      tacs := tacs.push <| ← `(tacticSeq| generalize (($rep _).$(mkIdent `get)) $st.$f = $tmpField at * ; dsimp +$(mkIdent `instances) [$[$localSimpTerms:ident],*] at $tmpField:ident ; veil_rename_hyp $tmpField:ident => $fDestructed:ident)
+      tacs := tacs.push <| ← `(tacticSeq| generalize (($rep _).$(mkIdent `get)) $st.$f = $tmpField at * ; dsimp +$(mkIdent `instances) [$[$generalizeSimpTerms:ident],*] at $tmpField:ident ; veil_rename_hyp $tmpField:ident => $fDestructed:ident)
     -- Clear the original state hypothesis
     tacs := tacs.push <| ← `(tacticSeq| try clear $st:ident)
   for t in tacs do
@@ -837,7 +846,7 @@ def elabVeilConcretizeFieldsTr : DesugarTacticM Unit := veilWithMainContext do
     veilEvalTactic tac
 
   -- Step 2: Concretize fields using the standard procedure
-  elabVeilConcretizeFieldsWp false
+  elabVeilConcretizeFieldsWp false (unfoldArrows := true)
 
   -- Step 3: Final simplification
   -- NOTE: `Bool.decide_eq_bool_eq` is ONLY used here for now; it might be
@@ -1161,7 +1170,7 @@ def elabVeilFoldBoolAtoms : DesugarTacticM Unit := veilWithMainContext do
     let f'Name := decl.userName
     mv ← foldStep "rename" <| renameFVarUserName mv decl.fvarId
       (mkVeilImplementationDetailName decl.userName)
-    let (f', mv') ← foldStep "let" <| mv.let f'Name value «type»
+    let (f', mv') ← foldStep "let" do (← mv.define f'Name «type» value).intro1P
     mv := mv'
     repl := repl.insert decl.fvarId (mkFVar f')
     letNames := letNames.push f'Name
