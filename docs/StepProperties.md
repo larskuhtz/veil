@@ -200,10 +200,13 @@ script, not a property of the model.
 
 * **Site**: a new file `Veil/Frontend/DSL/Module/StepLemmas.lean`,
   called once from `Module.ensureSpecIsFinalized`
-  (`Module/Elaborators.lean`) after `assembleRelationalTransitionSystem`
-  and before `Verifier.runManager`, inside the existing
-  `unless (← isModelCheckCompileMode)`. One call site in the merge-hotspot
-  file; everything else in the new file. Names in `Module/Names.lean`.
+  (`Module/Elaborators/Verification.lean`) after
+  `assembleRelationalTransitionSystem` and before `Verifier.runManager`,
+  gated by `veil.gen.stepLemmas`. (On the `be6a1cee` base this sat in
+  `Module/Elaborators.lean`, inside an `unless (← isModelCheckCompileMode)`;
+  upstream `517f2bad` split that file and deleted the compile mode.) One call
+  site in the merge-hotspot file; everything else in the new file. Names in
+  `Module/Names.lean`.
 * **Statements as syntax**: the binder regime is the RTS's own
   (`sortBinders ++ inhabitedBinders ++ userDefinedBinders`, as
   `assembleRelationalTransitionSystem` builds it, with the sorts and user
