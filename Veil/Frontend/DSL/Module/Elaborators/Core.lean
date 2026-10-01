@@ -321,7 +321,7 @@ def elabInitializer : CommandElab := fun stx => do
     mod ← mod.ensureStateIsDefined
     mod.throwIfSpecAlreadyFinalized
     let new_mod ← match stx with
-    | `(command|after_init {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.initializer) .none .none l stx
+    | `(command|after_init {$l:doSeq}) => withSlimVeilInfoTrees <| mod.defineProcedure (ProcedureInfo.initializer) .none .none l stx
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
 
@@ -334,8 +334,8 @@ def elabProcedure : CommandElab := fun stx => do
     mod ← mod.ensureStateIsDefined
     mod.throwIfSpecAlreadyFinalized
     let new_mod ← match stx with
-    | `(command|action $nm:ident $br:explicitBinders ? {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.action nm.getId) br .none l stx
-    | `(command|procedure $nm:ident $br:explicitBinders ? {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.procedure nm.getId) br .none l stx
+    | `(command|action $nm:ident $br:explicitBinders ? {$l:doSeq}) => withSlimVeilInfoTrees <| mod.defineProcedure (ProcedureInfo.action nm.getId) br .none l stx
+    | `(command|procedure $nm:ident $br:explicitBinders ? {$l:doSeq}) => withSlimVeilInfoTrees <| mod.defineProcedure (ProcedureInfo.procedure nm.getId) br .none l stx
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
     addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
@@ -369,7 +369,7 @@ def elabTransition : CommandElab := fun stx => do
         -- NOTE: We wrap the transition in a `decide` to ensure the required `Decidable` instance
         -- becomes an instance argument and can be used in extraction
         `(term| (fun ($th : $environmentTheory) ($st $st' : $environmentState) => $(mkIdent ``decide) ($tmp) = $(mkIdent ``true)))
-      mod.defineTransition (ProcedureInfo.action nm.getId (definedViaTransition := true)) br trStx stx
+      withSlimVeilInfoTrees <| mod.defineTransition (ProcedureInfo.action nm.getId (definedViaTransition := true)) br trStx stx
       -- FIXME: Is this required?
       -- -- warn if this is not first-order
       -- Command.liftTermElabM $ warnIfNotFirstOrder nm.getId
@@ -386,8 +386,8 @@ def elabProcedureWithSpec : CommandElab := fun stx => do
     mod ← mod.ensureStateIsDefined
     mod.throwIfSpecAlreadyFinalized
     let new_mod ← match stx with
-    | `(command|action $nm:ident $br:explicitBinders ? $spec:doSeq {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.action nm.getId) br spec l stx
-    | `(command|procedure $nm:ident $br:explicitBinders ? $spec:doSeq {$l:doSeq}) => mod.defineProcedure (ProcedureInfo.procedure nm.getId) br spec l stx
+    | `(command|action $nm:ident $br:explicitBinders ? $spec:doSeq {$l:doSeq}) => withSlimVeilInfoTrees <| mod.defineProcedure (ProcedureInfo.action nm.getId) br spec l stx
+    | `(command|procedure $nm:ident $br:explicitBinders ? $spec:doSeq {$l:doSeq}) => withSlimVeilInfoTrees <| mod.defineProcedure (ProcedureInfo.procedure nm.getId) br spec l stx
     | _ => throwUnsupportedSyntax
     localEnv.modifyModule (fun _ => new_mod)
     addVeilDefinitionSiteInfo (veilDeclSelectionRef stx) ((← getCurrNamespace) ++ nm)
@@ -434,7 +434,7 @@ def elabAssertion : CommandElab := fun stx => do
     | .stepProperty => "step_property"
   withTraceNode (`veil.perf.elaborator.assertion ++ assertion.name) (fun _ => return s!"{kindStr} {assertion.name}") do
     -- Elaborate the assertion in the Lean environment
-    let mod' ← mod.defineAssertion assertion
+    let mod' ← withSlimVeilInfoTrees <| mod.defineAssertion assertion
   --   dbg_trace s!"Elaborated assertion: {← liftTermElabM <|Lean.PrettyPrinter.formatTactic stx}"
     localEnv.modifyModule (fun _ => mod')
     unless stx[1].isNone do
@@ -462,7 +462,7 @@ def elabStepProperty : CommandElab := fun stx => do
     mod.mkAssertion .stepProperty name prop stx
   | _ => throwUnsupportedSyntax
   withTraceNode (`veil.perf.elaborator.assertion ++ assertion.name) (fun _ => return s!"step_property {assertion.name}") do
-    let mod' ← mod.defineAssertion assertion
+    let mod' ← withSlimVeilInfoTrees <| mod.defineAssertion assertion
     localEnv.modifyModule (fun _ => mod')
     unless stx[1].isNone do
       addVeilDefinitionSiteInfo stx[1][0][1] ((← getCurrNamespace) ++ assertion.name)
