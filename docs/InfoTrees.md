@@ -28,23 +28,27 @@ out-of-memory kill.
 
 ## What is kept
 
-The wrapper runs the elaborator, then replaces its info trees with one bare
-`TermInfo` per constant reference at an original source position, with no
-local or metavariable context. These are the identifiers the user wrote,
-including the definition site that `addVeilDefinitionSiteInfo` records. Each
-reference keeps its enclosing-declaration context (`parentDeclCtx`), which
-the `.ilean` records.
+The wrapper runs the elaborator, then replaces its info trees with one
+`TermInfo` per reference at an original source position: the identifiers the
+user wrote, including the definition site that `addVeilDefinitionSiteInfo`
+records. Each reference keeps its enclosing-declaration context
+(`parentDeclCtx`), which the `.ilean` records.
+
+- A constant keeps no context at all.
+- A local variable (an action's parameter, or a state component inside an
+  action body) keeps the minimal local context its hover needs: its own
+  declaration and, transitively, the declarations its type mentions. Types
+  are instantiated, and no metavariable context is kept.
 
 Kept:
-- hover, go-to-definition and find-references on every constant the user
+- hover, go-to-definition and find-references on every identifier the user
   wrote;
 - the `.ilean`. On `Chorus` it is identical to the one written without the
   wrapper: 242 referenced names, 207 definitions, 432 usage ranges, every
   usage and every enclosing declaration.
 
 Dropped:
-- hovers on bound variables (an action's parameters) and on the types of
-  subterms;
+- hovers on the types of compound subterms;
 - all info for generated syntax, which has synthetic positions.
 
 `#gen_spec` has no user syntax, so it records nothing. Slimming it at the end
@@ -57,17 +61,30 @@ Setup: `lake build Cadence.Chorus` on Cadence at `LEAN_NUM_THREADS=4`, peak
 resident set of the model's `lean` process, macOS, 14 cores, 36 GB. Run-to-run
 noise is about ±1 GB.
 
-| Veil | peak | memory after the first 2½ min | `.ilean` |
-|---|---|---|---|
-| without the change | 10.3 GB | climbs to the end | 432 usage ranges |
-| info trees off for these commands (rejected) | 7.7 GB | flat at 4.7 GB | 50 usage ranges |
-| slim declarations, nothing for `#gen_spec` | 8.6 GB | flat at 4.8–5.3 GB | identical to the first row |
+The hover counts come from the rendered Chorus page of Cadence's Verso
+literate site: `var` and `const` tokens that carry a hover.
+
+| Veil | peak | memory after the first 2½ min | `.ilean` usage ranges | `var` / `const` hovers |
+|---|---|---|---|---|
+| without the change | 10.3 GB | climbs to the end | 432 | 2 585 / 577 |
+| info trees off for these commands (rejected) | 7.7 GB | flat at 4.7 GB | 50 | — |
+| constants only (rejected) | 8.6 GB | flat at 4.8–5.3 GB | 432 | 293 / 582 |
+| constants and variables (this change) | 8.6 GB | flat at 4.8–5.2 GB | 432, identical | 2 602 / 582 |
 
 The rise in the last ~50 s of every run is the VC registry and the olean
-write, and it is unchanged.
+write, and it is unchanged. Keeping the variables' minimal contexts costs no
+measurable memory.
 
-The rejected row is the experiment that motivated the slim form. Switching
-info trees off loses every reference inside action bodies and properties.
+On the change, the whole Cadence suite re-validated warm in 365 s. The two
+single runs before it, on the earlier pins, took 631 s and 645 s on the same
+machine; that is one run each, not a controlled comparison. Rendering the
+Chorus page takes 377 s at a 6.0 GB peak.
+
+The two rejected rows are the experiments that led here:
+- switching info trees off loses every reference inside action bodies and
+  properties;
+- keeping constants only loses the hovers on an action's parameters and on
+  the state components it reads.
 
 A bisection on a scratch copy, with info trees switched off by region, found
 the two sources:

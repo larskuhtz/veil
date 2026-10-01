@@ -278,28 +278,57 @@ private def hasOriginalPos (stx : Syntax) : Bool :=
   | .original .. => true
   | _ => false
 
-/-- The constant references at original source positions in `t`: the
-`TermInfo` nodes whose expression is a constant, each with the innermost
-enclosing declaration (`parentDeclCtx`) it was elaborated under. -/
-private partial def collectVeilReferences (parent? : Option Name)
+/-- The local context a hover on `fvarId` needs: its declaration and,
+transitively, the declarations its type mentions, with metavariables
+instantiated from `mctx` and `let` values dropped. Nothing else of `lctx` (or
+of `mctx`) is kept alive. -/
+private partial def minimalLocalContext (mctx : MetavarContext) (lctx : LocalContext)
+    (fvarId : FVarId) : LocalContext := Id.run do
+  let inst (e : Expr) : Expr := (instantiateMVarsCore mctx e).1
+  let rec needed (todo : List FVarId) (need : Std.HashSet FVarId) : Std.HashSet FVarId :=
+    match todo with
+    | [] => need
+    | f :: rest =>
+      if need.contains f then needed rest need else
+      match lctx.find? f with
+      | none => needed rest need
+      | some d => needed ((CollectFVars.main (inst d.type) {}).fvarIds.toList ++ rest) (need.insert f)
+  let need := needed [fvarId] {}
+  lctx.foldl (init := {}) fun out d =>
+    if need.contains d.fvarId then
+      out.addDecl (.cdecl d.index d.fvarId d.userName (inst d.type) d.binderInfo d.kind)
+    else out
+
+/-- The references at original source positions in `t`: the `TermInfo`
+nodes whose expression is a constant or a local variable, each with the
+innermost enclosing declaration (`parentDeclCtx`) it was elaborated under. A
+variable's `TermInfo` is returned with its minimal local context already
+substituted, computed under the innermost command context's metavariables. -/
+private partial def collectVeilReferences (parent? : Option Name) (mctx : MetavarContext)
     (acc : Array (Option Name × TermInfo)) : InfoTree → Array (Option Name × TermInfo)
-  | .context (.parentDeclCtx p) t => collectVeilReferences (some p) acc t
-  | .context _ t => collectVeilReferences parent? acc t
+  | .context (.parentDeclCtx p) t => collectVeilReferences (some p) mctx acc t
+  | .context (.commandCtx ci) t => collectVeilReferences parent? ci.mctx acc t
+  | .context _ t => collectVeilReferences parent? mctx acc t
   | .node i cs =>
     let acc := match i with
       | .ofTermInfo ti =>
-        if ti.expr.consumeMData.isConst && hasOriginalPos ti.stx then acc.push (parent?, ti) else acc
+        if !hasOriginalPos ti.stx then acc else
+        match ti.expr.consumeMData with
+        | .const .. => acc.push (parent?, ti)
+        | .fvar id => acc.push (parent?, { ti with lctx := minimalLocalContext mctx ti.lctx id })
+        | _ => acc
       | _ => acc
-    cs.foldl (collectVeilReferences parent?) acc
+    cs.foldl (collectVeilReferences parent? mctx) acc
   | .hole _ => acc
 
 /-- Run one of Veil's declaration elaborators, then keep only the part of
-its info trees that a reader navigates by: one bare `TermInfo` per constant
-reference at an original source position — the identifiers the user wrote,
-including a declaration's definition site — with no local or metavariable
-context. Hover, go-to-definition and find-references on every constant the
-user wrote, and the `.ilean`, keep working; hovers on bound variables and on
-the types of subterms go.
+its info trees that a reader navigates by: one `TermInfo` per reference at an
+original source position — the identifiers the user wrote, including a
+declaration's definition site. A constant keeps no context at all; a local
+variable (an action's parameter, a state component in an action body) keeps
+the minimal local context its hover needs and no metavariable context. Hover,
+go-to-definition and find-references on every identifier the user wrote, and
+the `.ilean`, keep working; hovers on the types of compound subterms go.
 
 Why: the frontend keeps every command's info tree alive until the end of the
 file (the command line, for the `.ilean`) or for as long as the file is open
@@ -315,17 +344,22 @@ def withSlimVeilInfoTrees (x : CommandElabM α) : CommandElabM α := do
   try x finally
     let st ← getInfoState
     let refs := st.trees.foldl (init := #[]) fun acc t =>
-      collectVeilReferences none acc (t.substitute st.assignment)
+      collectVeilReferences none {} acc (t.substitute st.assignment)
     let mut seen : Std.HashSet (Option String.Pos.Raw × Option String.Pos.Raw × Name × Bool) := {}
     let mut trees := saved.trees
     for (parent?, ti) in refs do
-      let .const n us := ti.expr.consumeMData | continue
-      let key := (ti.stx.getPos?, ti.stx.getTailPos?, n, ti.isBinder)
+      let ref? : Option (Name × Expr × LocalContext) ← match ti.expr.consumeMData with
+        | .const n us =>
+          let e ← if us.any (·.hasMVar) then mkConstWithLevelParams n else pure (.const n us)
+          pure (some (n, e, {}))
+        | .fvar id => pure <| (ti.lctx.find? id).map fun d => (d.userName, .fvar id, ti.lctx)
+        | _ => pure none
+      let some (name, expr, lctx) := ref? | continue
+      let key := (ti.stx.getPos?, ti.stx.getTailPos?, name, ti.isBinder)
       if seen.contains key then continue
       seen := seen.insert key
-      let expr ← if us.any (·.hasMVar) then mkConstWithLevelParams n else pure (.const n us)
       let leaf : InfoTree := .node (.ofTermInfo
-        { elaborator := ti.elaborator, stx := ti.stx, lctx := {}, expectedType? := none,
+        { elaborator := ti.elaborator, stx := ti.stx, lctx, expectedType? := none,
           expr, isBinder := ti.isBinder }) {}
       trees := trees.push <| match parent? with
         | some p => .context (.parentDeclCtx p) leaf
