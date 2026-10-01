@@ -214,7 +214,10 @@ def elabGenSpec : CommandElab := fun stx => do
   -- Use dynamic trace class name for detailed profiling
   withTraceNode `veil.perf.elaborator.genSpec (fun _ => return "#gen_spec") do
     let mod ← getCurrentModule (errMsg := "You cannot elaborate a specification outside of a Veil module!")
-    let mod ← mod.ensureSpecIsFinalized stx
+    -- Everything `#gen_spec` elaborates is generated (the user wrote only the
+    -- keyword), so it records no info trees at all: holding them until the
+    -- command ends, as `withSlimVeilInfoTrees` would, is itself the peak.
+    let mod ← withEnableInfoTree false <| mod.ensureSpecIsFinalized stx
     localEnv.modifyModule (fun _ => mod)
 
 private def proofHasSorryGoalCount (results : VerificationResults VCMetadata SmtResult) : Nat :=

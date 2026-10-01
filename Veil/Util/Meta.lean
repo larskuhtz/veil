@@ -271,6 +271,67 @@ def addVeilDeclarationRanges [Monad m] [MonadEnv m] [MonadFileMap m] [MonadLiftT
   if (← findDeclarationRanges? declName).isSome then return
   addDeclarationRangesFromSyntax declName ref (veilDeclSelectionRef ref)
 
+/-- Is `stx` positioned in the user's source (not synthesized by a
+quotation)? -/
+private def hasOriginalPos (stx : Syntax) : Bool :=
+  match stx.getHeadInfo with
+  | .original .. => true
+  | _ => false
+
+/-- The constant references at original source positions in `t`: the
+`TermInfo` nodes whose expression is a constant, each with the innermost
+enclosing declaration (`parentDeclCtx`) it was elaborated under. -/
+private partial def collectVeilReferences (parent? : Option Name)
+    (acc : Array (Option Name × TermInfo)) : InfoTree → Array (Option Name × TermInfo)
+  | .context (.parentDeclCtx p) t => collectVeilReferences (some p) acc t
+  | .context _ t => collectVeilReferences parent? acc t
+  | .node i cs =>
+    let acc := match i with
+      | .ofTermInfo ti =>
+        if ti.expr.consumeMData.isConst && hasOriginalPos ti.stx then acc.push (parent?, ti) else acc
+      | _ => acc
+    cs.foldl (collectVeilReferences parent?) acc
+  | .hole _ => acc
+
+/-- Run one of Veil's declaration elaborators, then keep only the part of
+its info trees that a reader navigates by: one bare `TermInfo` per constant
+reference at an original source position — the identifiers the user wrote,
+including a declaration's definition site — with no local or metavariable
+context. Hover, go-to-definition and find-references on every constant the
+user wrote, and the `.ilean`, keep working; hovers on bound variables and on
+the types of subterms go.
+
+Why: the frontend keeps every command's info tree alive until the end of the
+file (the command line, for the `.ilean`) or for as long as the file is open
+(the language server). Veil elaborates a large amount of generated code per
+declaration — the action's derived definitions and lemmas — and those
+trees, together with the metavariable contexts they point to, grew a large
+model's memory steadily over the whole file (`docs/InfoTrees.md` has the
+measurement). `#gen_spec` records none at all: it has no user syntax. -/
+def withSlimVeilInfoTrees (x : CommandElabM α) : CommandElabM α := do
+  let saved ← getInfoState
+  unless saved.enabled do return ← x
+  modifyInfoState fun s => { s with trees := {} }
+  try x finally
+    let st ← getInfoState
+    let refs := st.trees.foldl (init := #[]) fun acc t =>
+      collectVeilReferences none acc (t.substitute st.assignment)
+    let mut seen : Std.HashSet (Option String.Pos.Raw × Option String.Pos.Raw × Name × Bool) := {}
+    let mut trees := saved.trees
+    for (parent?, ti) in refs do
+      let .const n us := ti.expr.consumeMData | continue
+      let key := (ti.stx.getPos?, ti.stx.getTailPos?, n, ti.isBinder)
+      if seen.contains key then continue
+      seen := seen.insert key
+      let expr ← if us.any (·.hasMVar) then mkConstWithLevelParams n else pure (.const n us)
+      let leaf : InfoTree := .node (.ofTermInfo
+        { elaborator := ti.elaborator, stx := ti.stx, lctx := {}, expectedType? := none,
+          expr, isBinder := ti.isBinder }) {}
+      trees := trees.push <| match parent? with
+        | some p => .context (.parentDeclCtx p) leaf
+        | none => leaf
+    modifyInfoState fun _ => { saved with trees }
+
 /-- Mark `nameStx`, the identifier with which a user command declares
 `declName`, as `declName`'s definition site: a binder `TermInfo` for the
 constant on that identifier. Together with a selection range equal to the
