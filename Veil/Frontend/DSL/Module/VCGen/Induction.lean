@@ -443,7 +443,23 @@ The statement elaborations are independent (closed statements against the
 current environment) and dominate the cost — measured ~62 ms each, i.e.
 ~8 min *serial* on a ~7600-VC module — so they run in
 core-count parallel chunks, joined before the single extension write.
-Entry order (VC uid order) is preserved by in-order concatenation. -/
+Entry order (VC uid order) is preserved by in-order concatenation.
+
+**Each statement is its own elaboration run.** A chunk is a loop of
+`liftTermElabM` calls, one per statement, each with a fresh metavariable
+context and its own heartbeat baseline, and the result is instantiated
+before the run ends. Elaborating a whole chunk in one run instead lets its
+state grow with the chunk and charges the chunk one heartbeat budget, which
+also absorbs whatever other tasks the worker thread runs while the chunk
+waits. Both scale with the chunk size, i.e. with the VC count divided by the
+machine's core count: on a 4-core runner a ~9 600-VC module had 3 chunks of
+~3 200 statements alive at once and ran out of memory, and at two threads
+the queued chunk timed out. Per-statement runs keep the live elaboration
+state at one statement per worker and give each statement the budget of one
+command. The stored types are hash-consed (`ShareCommon`) before the
+extension write, so the invariant clump every statement repeats is shared in
+memory as it already is in the olean. Neither changes an entry: the
+statements are the same `Expr`s. -/
 def Module.persistVCRegistry (mod : Module) : CommandElabM Unit := do
   let vcs ← Verifier.withVCManager fun ref => do
     return (← ref.get).nodes.values.toArray
@@ -468,8 +484,9 @@ def Module.persistVCRegistry (mod : Module) : CommandElabM Unit := do
       -- Never let this task die without resolving the promise (cf. the
       -- discharger-totality lesson: an unresolved promise hangs the join).
       try
-        let entries ← liftTermElabM <| chunk.mapM fun (vc, m) => do
-          let ty ← vc.toVCStatement.type
+        let entries ← chunk.mapM fun (vc, m) => do
+          -- One elaboration run per statement: fresh state, own budget.
+          let ty ← liftTermElabM do instantiateMVars (← vc.toVCStatement.type)
           return { name := vc.name, «action» := m.action, property := m.property,
                    kind := m.kind, style := m.style,
                    params := vc.params.map (⟨sanitizePersistedSyntax ·⟩),
@@ -490,7 +507,11 @@ def Module.persistVCRegistry (mod : Module) : CommandElabM Unit := do
       throwError "VC registry for `{mod.name}`: statement elaboration failed: {msg}"
     | none =>
       throwError "VC registry for `{mod.name}`: an elaboration task dropped its result"
-  modifyEnv fun env => vcRegistryExt.addEntry env (mod.name, entries)
+  -- Share the subterms the statements have in common (the invariant clump
+  -- above all) before the entries are stored and kept for the olean write.
+  let types := Lean.ShareCommon.shareCommon (entries.map (·.type))
+  let shared := (entries.zip types).map fun (e, ty) => { e with «type» := ty }
+  modifyEnv fun env => vcRegistryExt.addEntry env (mod.name, shared)
   logInfo m!"VC registry persisted for `{mod.name}`: {entries.size} VCs \
     (`veil.gen.vcRegistry`)"
 
