@@ -581,6 +581,22 @@ The two tactics it is built from are available for manual cells:
   or reordered, and the tactic fails loudly if the clump shape no longer
   matches the declaration list.
 
+A `step_property` cell gets the same ladder with its own first rung:
+
+```lean
+by first | veil_solve_step_frame | veil_solve_step
+```
+
+`veil_solve_step_frame` runs the step route with the invariant clump and the
+module's assumptions cleared, and closes each goal with `grind` — Lean's own
+solver-free procedure, which uses the transition's post-state equations as
+E-matching facts. Frame cells, monotone updates and updates settled by the
+action's guards close this way; a cell that needs an invariant or an
+assumption declines and falls through. `grind` runs under a heartbeat budget
+of its own, `veil.vc.stepRungHeartbeats` (default 20000, in the units of
+`maxHeartbeats`); exceeding it is a decline like any other, and since it
+counts heartbeats, not wall time, which cells decline is deterministic.
+
 ### 11. Doc Comments on Declarations
 
 Any Veil command that declares something can be preceded by a doc comment,

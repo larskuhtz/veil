@@ -386,6 +386,16 @@ private def mkWpDischargeTerm [Monad m] [MonadEnv m] [MonadOptions m] [MonadQuot
   else
     `(term| by $smtTac:tactic)
 
+/-- The discharger *term* of a `step_property` cell: the cheap non-SMT
+rung (`veil_solve_step_frame`, under `veil.vc.cheapRung`) in front of the
+solver route, as one `first` — the step-cell twin of `mkWpDischargeTerm`. -/
+private def mkStepDischargeTerm [Monad m] [MonadOptions m] [MonadQuotation m]
+    (stepTac : TSyntax `tactic) : m Term := do
+  if veil.vc.cheapRung.get (← getOptions) then
+    `(term| by first | veil_solve_step_frame | $stepTac:tactic)
+  else
+    `(term| by $stepTac:tactic)
+
 /-- Generate doesNotThrow VCs for all actions.
     These VCs check that actions don't throw exceptions assuming the invariants hold. -/
 def Module.generateDoesNotThrowVCs (mod : Module) : CommandElabM Unit := do
@@ -468,7 +478,7 @@ def Module.generateStepPropertyVCs (mod : Module) : CommandElabM Unit := do
   if steps.isEmpty then return
   let actions := mod.procedures.filter fun s => s.info matches .action _ _
   let stepSolve ← `(tactic| veil_solve_step)
-  let stepTactic ← `(by $stepSolve:tactic)
+  let stepTactic ← mkStepDischargeTerm stepSolve
   let stepRetries ← mkRetryTerms stepSolve
   let vcData ← actions.foldlM (init := #[]) fun acc act => do
     steps.foldlM (init := acc) fun acc' p => do
@@ -612,9 +622,11 @@ def VCRegistryEntry.dischargeTactic (e : VCRegistryEntry) :
 
 /-- The discharger *term* for a registry entry, i.e. `dischargeTactic`
 with the cheap non-SMT rung (`veil.vc.cheapRung`) in front of it where it
-applies — the cross-file twin of `mkWpDischargeTerm`. WP cells only: the
-rung goes through the local-WP bridge, and a `doesNotThrow` cell has no
-invariant to project. Retry dischargers keep the bare tactic.
+applies — the cross-file twin of `mkWpDischargeTerm` and
+`mkStepDischargeTerm`. A WP invariant cell gets the frame rung, a step cell
+the step rung; a `doesNotThrow` cell has no invariant to project and a TR
+cell keeps its bridge, so neither gets one. Retry dischargers keep the bare
+tactic.
 
 Public: `#prove_vc` uses it as the default proof term. -/
 def VCRegistryEntry.dischargeTerm (modName : Name) (e : VCRegistryEntry) :
@@ -624,6 +636,7 @@ def VCRegistryEntry.dischargeTerm (modName : Name) (e : VCRegistryEntry) :
   | .wp =>
     if e.property == `doesNotThrow then `(by $tac:tactic)
     else mkWpDischargeTerm (modName ++ e.property) tac
+  | .step => mkStepDischargeTerm tac
   | _ => `(by $tac:tactic)
 
 private def VCRegistryEntry.nameSuffix (e : VCRegistryEntry) : String :=
