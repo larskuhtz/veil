@@ -354,6 +354,11 @@ eliminated the untouched post-state fields — so there is nothing left to
 prove but the right conjunct to project. That is a property of the WP
 machinery, not of any particular development.
 
+The conjunct is matched against the goal by `exact` first and, on a miss,
+by a metavariable telescope over all of its binders whose hypotheses are
+filled from the context (`frameCloseByTelescope`): the goal may still
+quantify the invariant's variables, or have them introduced already.
+
 This tactic either closes the goal or fails; it is `done`-terminated on
 purpose, because `repeat` never fails and a branch that "succeeds" having
 closed nothing would make the enclosing `first` commit to it. -/
@@ -1776,6 +1781,72 @@ it is generated in the same place, and an implementation-detail name
 cannot collide with a user's. -/
 private def veilFrameHypName : Name := `__veil_frame_hyp
 
+/-- The second matcher of `veil_solve_frame`: close `g` by the projected
+conjunct `h`, applied to fresh metavariables for *all* of its binders.
+
+The first matcher (`exact h` / `exact h ..` between `intro`s) needs the
+goal and `h` to agree on which binders are still quantified. They
+disagree when Veil's simplification has introduced the property's
+variables into the context (`J I : node`, …) but left its hypotheses in
+the goal: `exact h` then meets a `∀` against an implication, and once
+the hypotheses are introduced `exact h ..` makes every argument —
+hypotheses included — a hole that unifying the conclusion cannot fill.
+Guard-free actions (`flag i := true`) produce exactly this shape.
+
+Here the goal's binders are introduced, `h`'s type is opened as a
+metavariable telescope, its conclusion is unified with the goal, and each
+hypothesis metavariable is filled by a local hypothesis of matching type.
+A hypothesis is filled only once its candidate is determined — its type
+has no unassigned metavariable left, or exactly one local matches it —
+and filling one may determine the next, so the loop runs to a fixed
+point. There is no backtracking and every unification is at reducible
+transparency, so a miss costs at most one pass over the context per
+hypothesis per round; anything left unassigned is a miss. The proof term
+is `h` applied to the goal's own locals: a projection, never a search
+for a proof of anything `h` does not already state. -/
+private def frameCloseByTelescope (h : FVarId) (g : MVarId) : MetaM Bool := do
+  let (_, g) ← g.intros
+  g.withContext do
+    let target ← instantiateMVars (← g.getType)
+    let (ms, _, concl) ← forallMetaTelescope (← instantiateMVars (← h.getType))
+    unless ← withReducible (isDefEq concl target) do return false
+    let mut locals := #[]
+    for d in (← getLCtx) do
+      if d.isImplementationDetail then continue
+      if ← isProp d.type then locals := locals.push d
+    let mut pending ← ms.filterM fun m => do
+      return !(← m.mvarId!.isAssigned) && (← isProp (← inferType m))
+    let mut progress := true
+    while progress && !pending.isEmpty do
+      progress := false
+      let mut rest := #[]
+      for m in pending do
+        if ← m.mvarId!.isAssigned then continue
+        let ty ← instantiateMVars (← inferType m)
+        let closedTy := !ty.hasExprMVar
+        let mut cands := #[]
+        for d in locals do
+          let s ← saveState
+          let ok ← withReducible (isDefEq ty d.type)
+          s.restore
+          if ok then
+            cands := cands.push d
+            -- A closed type is met by any match; the first will do.
+            if closedTy then break
+        if cands.isEmpty then return false
+        if closedTy || cands.size == 1 then
+          let d := cands[0]!
+          unless ← withReducible (isDefEq ty d.type) do return false
+          m.mvarId!.assign (mkFVar d.fvarId)
+          progress := true
+        else
+          rest := rest.push m
+      pending := rest
+    let pf ← instantiateMVars (mkAppN (mkFVar h) ms)
+    if pf.hasExprMVar then return false
+    g.assign pf
+    return true
+
 @[inherit_doc veil_solve_frame]
 def elabVeilSolveFrame (invIdent : Ident) : DesugarTacticM Unit := veilWithMainContext do
   CheapRung.recordAttempt
@@ -1811,13 +1882,30 @@ def elabVeilSolveFrame (invIdent : Ident) : DesugarTacticM Unit := veilWithMainC
   -- would "succeed" having closed nothing, the enclosing `first` would
   -- commit to it, and the cell would die with "unsolved goals" instead of
   -- falling through to the solver.
-  try
-    veilEvalTactic <| ← `(tacticSeq|
-      all_goals (repeat (first | exact $h | exact $h .. | intro _))
-      done)
-  catch ex =>
-    trace[veil.cheapRung] "declined ({invIdent.getId}): not a frame cell"
-    throw ex
+  --
+  -- When this matcher misses, `frameCloseByTelescope` gets a second try
+  -- on each goal: it covers the goals whose property variables are
+  -- introduced while its hypotheses are not (see its docstring). The
+  -- first matcher stays in front, so every cell it closes is closed as
+  -- before; the second runs only on its misses.
+  let closedByExact ← DesugarTacticM.orElse
+    (do
+      veilEvalTactic <| ← `(tacticSeq|
+        all_goals (repeat (first | exact $h | exact $h .. | intro _))
+        done)
+      pure true)
+    (fun _ => pure false)
+  unless closedByExact do
+    let gs ← getGoals
+    let closed ← gs.allM fun g => g.withContext do
+      let some d := (← getLCtx).findFromUserName? veilFrameHypName | pure false
+      frameCloseByTelescope d.fvarId g
+    unless closed do
+      trace[veil.cheapRung] "declined ({invIdent.getId}): not a frame cell"
+      throwError "veil_solve_frame: `{invIdent.getId}` does not close the \
+        goal by projection — not a frame cell"
+    setGoals []
+    trace[veil.cheapRung] "telescope matcher closed ({invIdent.getId})"
   CheapRung.recordWin
   trace[veil.cheapRung] "⚡ closed without a solver ({invIdent.getId})"
 

@@ -546,6 +546,17 @@ simplification has eliminated the untouched post-state fields — so there is
 nothing left to prove, only the right conjunct to find. That is a property of
 the WP machinery, not of any particular protocol.
 
+The goal reaches the rung in one of two shapes: with the invariant's binders
+still quantified, or with them already introduced as local variables and only
+its hypotheses left in the goal (guard-free actions produce the second). The
+closer has two matchers for them. The first is `exact h` / `exact h ..`
+between `intro`s; when it misses, the second opens `h` as a metavariable
+telescope over *all* its binders, unifies the conclusion with the goal and
+fills each hypothesis from the context, one determined match at a time —
+no backtracking, reducible transparency only, so a miss stays cheap. Both
+produce `h` applied to the goal's own locals: a projection, not a search.
+`VeilTest/CheapRungBinders.lean` pins both shapes and a decline.
+
 The rung is *tried*, never predicted. It either closes the goal or fails, and
 failure falls through to the solver, so this changes how cells are proven,
 not what is proven: both paths end in a kernel-checked term, and the cheap
