@@ -274,6 +274,26 @@ register_option veil.vc.cheapRung : Bool := {
   it; the cross-file registry commands read it where they run."
 }
 
+register_option veil.vc.frameBridge : Bool := {
+  defValue := true
+  descr := "If true (default), the cheap frame rung (`veil_solve_frame`, \
+  under `veil.vc.cheapRung`) shares its setup across the cells of an \
+  action and closes a frame cell without simp. Three parts. (1) The \
+  local-WP bridge receives the postcondition's `LocalRProp` instance by \
+  name (`<Module>.instLocalRProp<Inv>`) instead of by instance search: \
+  the invariants are reducible, so the discrimination tree keys every \
+  per-invariant instance alike and a search tries all of them (~0.1 s per \
+  cell on a ~125-invariant module). (2) `#prove_action` emits one \
+  kernel-checked theorem per action, `<action>.ext.frame_bridge`: the \
+  bridge (refine, `wp_local_eq` rewrite, unfolds, dsimps) run once over an \
+  abstract postcondition and instance, which each cell instantiates \
+  instead of re-running it. (3) The conjunct is projected and the goal \
+  closed by `exact` with no simp of goal or hypothesis; only if that fails \
+  do the simps of `unveil_local`/`veil_inv_have` run. Cell statements are \
+  unchanged; only their proof terms differ. Set to false to restore the \
+  previous rung exactly (useful for A/B measurement)."
+}
+
 register_option veil.vc.stepRungHeartbeats : Nat := {
   defValue := 20000
   descr := "Heartbeat budget (in thousands, as `maxHeartbeats`) of the \

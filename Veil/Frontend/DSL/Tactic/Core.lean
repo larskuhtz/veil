@@ -1074,6 +1074,22 @@ private def mkLocalPreconditionTactics (numFields : Nat) (theoryType stateType p
   else
     throwError "{tacticName}: expected precondition to be Invariants or True, got{indentExpr pre}"
 
+/-- The `LocalRProp` instance `#gen_spec` registered for the postcondition
+`post`, by name: `<Module>.instLocalRProp<Inv>` when `post` is (the eta
+form of) a module invariant `<Module>.<inv>` applied to its arguments
+(`proveLocalityForStatePredicate` names it so). Handing it to the bridge
+saves an instance search that, because the invariants are reducible, has to
+try every per-invariant instance of the module in turn (they share one
+discrimination-tree key). `none` under `veil.vc.frameBridge false`, or when
+`post` is not of that shape — the caller then searches as before. -/
+def localRPropInstanceByName? (post : Expr) : MetaM (Option Name) := do
+  unless veil.vc.frameBridge.get (← getOptions) do return none
+  let post := (← instantiateMVars post).consumeMData.eta
+  let some c := post.getAppFn.constName? | return none
+  let .str pfx s := c | return none
+  let n := pfx ++ Name.mkSimple ("instLocalRProp" ++ s.capitalize)
+  return if (← getEnv).contains n then some n else none
+
 /-- Implementation of `veil_apply_local_wp`; see the tactic syntax declaration
 for the user-facing behavior. -/
 def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
@@ -1085,13 +1101,13 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
   -- (`act/assu/pre/post`) are implicit theorem arguments and are recovered from
   -- the expected target instead of being rebuilt as one giant application.
   let goal ← getMainGoal
-  let (actName, wpLocalEqName, immutNames, mutNames, preCoreTac?, hPreTac, handlerTerm, postIsTrue) ← goal.withContext do
+  let (actName, wpLocalEqName, immutNames, mutNames, preCoreTac?, hPreTac, handlerTerm, postIsTrue, postInst?) ← goal.withContext do
     let target ← instantiateMVars (← goal.getType)
     let target := target.consumeMData
     -- After introducing action parameters, the goal should be one of the
     -- public WP-style VC shapes.  Keep the original `assu/pre/post`; the tactic
     -- only changes how this goal is proved.
-    let (theoryType, stateType, act, pre, handlerTerm, postIsTrue) ←
+    let (theoryType, stateType, act, pre, handlerTerm, postIsTrue, postInst?) ←
       match_expr target with
       | VeilM.meetsSpecificationIfSuccessfulAssuming _ theoryType stateType _ act _ pre post =>
         let truePost ← withLocalDeclsDND
@@ -1099,7 +1115,8 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
           fun xs => mkLambdaFVars xs (mkConst ``True)
         pure (theoryType, stateType, act, pre,
           ← `(term| fun _ => $(mkIdent ``True)),
-          ← withBackwardsCompatibility (isDefEq post truePost))
+          ← withBackwardsCompatibility (isDefEq post truePost),
+          ← localRPropInstanceByName? post)
       | VeilM.doesNotThrowAssuming_ex _ theoryType stateType _ act _ pre ex =>
         -- NOTE: We rely on the assumption that `ex` is a fvar; otherwise, constructing
         -- the handler at the syntax level might not be reliable, if through delaboration
@@ -1108,7 +1125,7 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
         let exBinder := mkIdent <| exDecl.userName.appendAfter "'"    -- avoid name clashing
         pure (theoryType, stateType, act, pre,
           ← `(term| fun $exBinder:funBinder => $exBinder:ident ≠ $(mkIdent exDecl.userName):term),
-          true)
+          true, none)
       | _ =>
         throwError "veil_apply_local_wp: expected a VeilM.meetsSpecificationIfSuccessfulAssuming or VeilM.doesNotThrowAssuming_ex goal, got{indentExpr target}"
     let some actName := act.getAppFn'.constName?
@@ -1116,7 +1133,7 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
     let wpLocalEqName ← resolveGlobalConstNoOverloadCore (toWpLocalEqName actName)
     let (immutNames, mutNames) ← moduleComponentNames actName
     let (preCoreTac?, hPreTac) ← mkLocalPreconditionTactics (immutNames.size + mutNames.size) theoryType stateType pre "veil_apply_local_wp"
-    pure (actName, wpLocalEqName, immutNames, mutNames, preCoreTac?, hPreTac, handlerTerm, postIsTrue)
+    pure (actName, wpLocalEqName, immutNames, mutNames, preCoreTac?, hPreTac, handlerTerm, postIsTrue, postInst?)
   -- NOTE: We intentionally use a lightly-applied `refine` here rather than
   -- building a fully-instantiated theorem application.  On larger modules,
   -- constructing the complete application forces Lean to elaborate huge VC
@@ -1136,18 +1153,25 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
       let (trueCore, rflLocalEq) ← mkTrueLocalRPropComponents (immutNames.size + mutNames.size)
       pure <| some <| ← `(term| ⟨$trueCore:term, $rflLocalEq:term⟩)
     else pure none
-  let hWpTac ← do
-    let tm ← match truePostInst? with
-      | some inst => `($(mkIdent wpLocalEqName):ident ($(mkVeilImplementationDetailIdent `localRPropTC) := $inst:term))
-      | none => `($(mkIdent wpLocalEqName):ident)
-    `(tactic| (unhygienic intro $(mkIdent `handler) $(mkIdent `th) $(mkIdent `st) ; rw [$tm:term]))
-  let refineTac ← do
-    let tm ← match truePostInst? with
-      | some inst => `($localMeetsSpecificationIfSuccessfulAssuming:ident
+  -- `namedInst?`: the postcondition's instance by name
+  -- (`localRPropInstanceByName?`), passed to both the bridge and
+  -- `wp_local_eq` so that neither searches for it.
+  let mkBridgeTac (namedInst? : Option Term) : DesugarTacticM (TSyntax `tactic) := do
+    let hWpTac ← do
+      let tm ← match truePostInst?, namedInst? with
+        | some inst, _ | none, some inst =>
+          `($(mkIdent wpLocalEqName):ident ($(mkVeilImplementationDetailIdent `localRPropTC) := $inst:term))
+        | none, none => `($(mkIdent wpLocalEqName):ident)
+      `(tactic| (unhygienic intro $(mkIdent `handler) $(mkIdent `th) $(mkIdent `st) ; rw [$tm:term]))
+    let tm ← match truePostInst?, namedInst? with
+      | some inst, _ => `($localMeetsSpecificationIfSuccessfulAssuming:ident
         ($(mkVeilImplementationDetailIdent `post):ident := $truePostTerm:term)
         ($(mkVeilImplementationDetailIdent `localRPropTC):ident := $inst:term)
         $handlerTerm:term ?_ ?_ ?_ ?_ ?_ ?_)
-      | none => `($localMeetsSpecificationIfSuccessfulAssuming:ident
+      | none, some inst => `($localMeetsSpecificationIfSuccessfulAssuming:ident
+        ($(mkVeilImplementationDetailIdent `localRPropTC):ident := $inst:term)
+        $handlerTerm:term ?_ ?_ ?_ ?_ ?_ ?_)
+      | none, none => `($localMeetsSpecificationIfSuccessfulAssuming:ident
         $handlerTerm:term ?_ ?_ ?_ ?_ ?_ ?_)
     `(tactic| refine' $tm:term <;>
       [ skip
@@ -1157,7 +1181,15 @@ def elabVeilApplyLocalWp : DesugarTacticM Unit := veilWithMainContext do
       ; $hPreTac:tactic
       ; $hWpTac:tactic
       ; skip ])
-  veilEvalTactic refineTac
+  match postInst? with
+  | some n =>
+    -- The by-name instance is an optimisation only: should it not fit,
+    -- fall back to the search.
+    let named ← `(($(mkCIdent n) ..))
+    let withNamed ← mkBridgeTac (some named)
+    let withSearch ← mkBridgeTac none
+    veilEvalTactic <| ← `(tactic| first | $withNamed:tactic | $withSearch:tactic)
+  | none => veilEvalTactic (← mkBridgeTac none)
   let [_] ← getUnsolvedGoals
     | throwError "veil_apply_local_wp: expected exactly one local/core goal after applying the bridge theorem"
   -- The remaining goal is the theorem's `hLocal` premise.  Introduce exposed
@@ -1456,8 +1488,9 @@ def elabVeilUnveilLocal : DesugarTacticM Unit := veilWithMainContext do
     veil_intro_ho
     veil_simp +$(mkIdent `instances))
 
-@[inherit_doc veil_inv_have]
-def elabVeilInvHave (h : Ident) (invIdent : Ident) : DesugarTacticM Unit := veilWithMainContext do
+/-- Project the conjunct `invIdent` out of the invariant clump `hinv` of the
+main goal into a new hypothesis `h`, without simplifying it. -/
+private def veilInvProject (h : Ident) (invIdent : Ident) : DesugarTacticM Unit := veilWithMainContext do
   let invName ← realizeGlobalConstNoOverloadWithInfo invIdent
   let invariantsName := invName.getPrefix ++ assembledInvariantsName
   let names ← assembledInvariantNames invariantsName
@@ -1485,6 +1518,10 @@ def elabVeilInvHave (h : Ident) (invIdent : Ident) : DesugarTacticM Unit := veil
     ]
     return goal
   replaceMainGoal [newGoal]
+
+@[inherit_doc veil_inv_have]
+def elabVeilInvHave (h : Ident) (invIdent : Ident) : DesugarTacticM Unit := veilWithMainContext do
+  veilInvProject h invIdent
   veilEvalTactic <| ← `(tactic| veil_simp +$(mkIdent `instances) at $h:ident)
 
 /-- The local name `veil_solve_frame` binds the projected conjunct to.
@@ -1493,27 +1530,127 @@ it is generated in the same place, and an implementation-detail name
 cannot collide with a user's. -/
 private def veilFrameHypName : Name := `__veil_frame_hyp
 
-@[inherit_doc veil_solve_frame]
-def elabVeilSolveFrame (invIdent : Ident) : DesugarTacticM Unit := veilWithMainContext do
-  CheapRung.recordAttempt
-  let h := mkIdent veilFrameHypName
-  -- Two stages, so `trace.veil.cheapRung` distinguishes the two very
-  -- different reasons a rung declines. "not framed" is the ordinary miss
-  -- this ladder is designed to absorb; "setup" means the local-WP bridge
-  -- or the by-name projection itself is unavailable, which would make the
-  -- rung decline on *every* cell — the silent-failure mode to watch for.
-  -- `all_goals` rather than a bare call, so that a cell whose goal
-  -- `unveil_local` has already closed outright (an invariant the WP
-  -- simplification discharges on its own) counts as a win rather than a
-  -- "no goals to prove" decline.
-  try
-    veilEvalTactic <| ← `(tacticSeq|
-      unveil_local
-      all_goals veil_inv_have $h := $invIdent)
-  catch ex =>
-    trace[veil.cheapRung] "declined at setup ({invIdent.getId}): \
-      {ex.toMessageData}"
-    throw ex
+/-! ### The per-action frame bridge (`veil.vc.frameBridge`)
+
+Every frame cell of an action starts with the same local-WP bridge
+(`veil_apply_local_wp`: the bridge theorem, the `wp_local_eq` rewrite, the
+unfolds and dsimps); only the postcondition differs. `#prove_action` runs
+that bridge once over an *abstract* postcondition `post` and instance
+`[LocalRProp post]` and records the result as one kernel-checked theorem
+per action,
+
+  `<action>.ext.frame_bridge : ∀ xs post [LocalRProp post],
+      (∀ fields has hinv, G) → meetsSpecificationIfSuccessfulAssuming …`,
+
+where `G` is the goal the bridge leaves. A cell then instantiates the
+theorem at its invariant and that invariant's instance, by name, instead of
+re-running the bridge. -/
+
+/-- The name of an action's frame-bridge theorem; `actConst` is the action
+constant of the VC (`<Module>.<action>.ext`). -/
+def toFrameBridgeName (actConst : Name) : Name := actConst ++ `frame_bridge
+
+/-- The local declarations of `g`'s context after `after`. -/
+private def localDeclsAfter (g : MVarId) (after : FVarId) : MetaM (Array Expr) := do
+  let lctx := (← g.getDecl).lctx
+  let some d := lctx.find? after | throwError "frame bridge: lost a local declaration"
+  let mut out := #[]
+  for d' in lctx do
+    if d'.index > d.index && !d'.isImplementationDetail then out := out.push d'.toExpr
+  return out
+
+/-- Emit the frame-bridge theorem of the action of `vcType` (a WP
+invariant-preservation VC statement, as the VC registry stores it) unless
+it exists already; return its name. `none` when the statement is not of
+that shape or its postcondition has no named `LocalRProp` instance. The
+theorem is proved by running `veil_apply_local_wp` on the abstract goal
+twice — once to read off the goal it leaves, once to close that goal with
+the premise — and is `addDecl`ed, i.e. kernel-checked, like any cell. -/
+def emitFrameBridgeLemma (vcType : Expr) : TermElabM (Option Name) := do
+  forallTelescope vcType fun xs body => do
+    let body := body.consumeMData
+    let_expr VeilM.meetsSpecificationIfSuccessfulAssuming _ _ _ _ act _ _ post := body
+      | return none
+    let some actConst := act.getAppFn'.constName? | return none
+    let lemName := toFrameBridgeName actConst
+    if (← getEnv).contains lemName then return some lemName
+    let some instName ← localRPropInstanceByName? post | return none
+    -- The class application `LocalRProp <module params> ·`, read off the
+    -- instance's own type at this cell's postcondition.
+    let instC ← mkConstWithFreshMVarLevels instName
+    let (_, _, ity) ← forallMetaTelescope (← inferType instC)
+    let .app classFn ityPost := ity | return none
+    unless ← isDefEq ityPost post do return none
+    let classFn ← instantiateMVars classFn
+    if classFn.hasExprMVar then return none
+    withLocalDeclD `__veil_post (← inferType post) fun postV => do
+    withLocalDecl `__veil_inst .instImplicit (mkApp classFn postV) fun instV => do
+      let goalTy := mkAppN body.getAppFn (body.getAppArgs.set! 7 postV)
+      let bridge : TacticM Unit := do evalTactic (← `(tactic| veil_apply_local_wp))
+      -- 1. What does the bridge leave for an abstract postcondition?
+      let m ← mkFreshExprMVar goalTy .syntheticOpaque
+      let [g] ← Tactic.run m.mvarId! bridge | return none
+      let premise ← g.withContext do
+        mkForallFVars (← localDeclsAfter g instV.fvarId!) (← instantiateMVars (← g.getType))
+      -- 2. The same bridge, its left-over goal closed by the premise.
+      let some pf ← withLocalDeclD `__veil_hLocal premise fun hL => do
+          let m2 ← mkFreshExprMVar goalTy .syntheticOpaque
+          let [g2] ← Tactic.run m2.mvarId! bridge | return none
+          let ok ← g2.withContext do
+            let v := mkAppN hL (← localDeclsAfter g2 hL.fvarId!)
+            if ← isDefEq (← inferType v) (← g2.getType) then g2.assign v; pure true
+            else pure false
+          unless ok do return none
+          return some (← mkLambdaFVars #[hL] (← instantiateMVars m2))
+        | return none
+      let stmt ← instantiateMVars (← mkForallFVars (xs ++ #[postV, instV]) (← mkArrow premise goalTy))
+      let pf ← instantiateMVars (← mkLambdaFVars (xs ++ #[postV, instV]) pf)
+      if stmt.hasMVar || pf.hasMVar || pf.hasSorry then return none
+      unless (collectLevelParams {} stmt).params.isEmpty do return none
+      let _ ← addVeilTheorem lemName stmt pf (addNamespace := false)
+      return some lemName
+
+/-- Open a frame cell through its action's frame-bridge theorem: introduce
+the action parameters, instantiate the theorem at the cell's invariant and
+that invariant's `LocalRProp` instance (by name), and introduce the exposed
+fields and `has`/`hinv`. `false`, with the goal untouched apart from the
+introductions, when there is no theorem or it does not fit. -/
+private def veilApplyFrameBridge? : DesugarTacticM Bool := do
+  veilEvalTactic <| ← `(tactic| unhygienic intros)
+  let goal ← getMainGoal
+  let r? ← goal.withContext do
+    let target := (← instantiateMVars (← goal.getType)).consumeMData
+    let_expr VeilM.meetsSpecificationIfSuccessfulAssuming _ _ _ _ act _ _ post := target
+      | return none
+    let some actConst := act.getAppFn'.constName? | return none
+    let lemName := toFrameBridgeName actConst
+    unless (← getEnv).contains lemName do return none
+    let some instName ← localRPropInstanceByName? post | return none
+    let lemC ← mkConstWithFreshMVarLevels lemName
+    let (ms, _, concl) ← forallMetaTelescope (← inferType lemC)
+    unless ms.size ≥ 3 do return none
+    unless ← withBackwardsCompatibility (isDefEq concl target) do return none
+    let instC ← mkConstWithFreshMVarLevels instName
+    let (instArgs, _, ity) ← forallMetaTelescope (← inferType instC)
+    let instM := ms[ms.size - 2]!
+    unless ← isDefEq ity (← inferType instM) do return none
+    let instE ← instantiateMVars (mkAppN instC instArgs)
+    if instE.hasExprMVar then return none
+    instM.mvarId!.assign instE
+    let pf ← instantiateMVars (mkAppN lemC ms.pop)
+    if pf.hasExprMVar then return none
+    let (immutNames, mutNames) ← moduleComponentNames actConst
+    let hL := ms.back!.mvarId!
+    goal.assign (mkApp pf (mkMVar hL))
+    let (_, g') ← hL.introNP (immutNames.size + mutNames.size + 2)
+    return some g'
+  match r? with
+  | some g' => replaceMainGoal [g']; return true
+  | none => return false
+
+/-- The closing step of the frame rung: every remaining goal is the
+projected conjunct `h` behind the action's guards. -/
+private def veilCloseFrameGoals (h : Ident) : DesugarTacticM Unit := do
   -- `exact $h ..` next to `exact $h` because the goal may or may not
   -- still carry the property's own binders: Veil's simplification
   -- introduces them on some cells and leaves them quantified on others,
@@ -1528,10 +1665,81 @@ def elabVeilSolveFrame (invIdent : Ident) : DesugarTacticM Unit := veilWithMainC
   -- would "succeed" having closed nothing, the enclosing `first` would
   -- commit to it, and the cell would die with "unsolved goals" instead of
   -- falling through to the solver.
+  veilEvalTactic <| ← `(tacticSeq|
+    all_goals (repeat (first | exact $h | exact $h .. | intro _))
+    done)
+
+/-- `veilInvProject` on every goal. -/
+private def veilInvProjectAll (h : Ident) (invIdent : Ident) : DesugarTacticM Unit := do
+  let mut out := []
+  for g in ← getGoals do
+    setGoals [g]
+    veilInvProject h invIdent
+    out := out ++ (← getGoals)
+  setGoals out
+
+@[inherit_doc veil_solve_frame]
+def elabVeilSolveFrame (invIdent : Ident) : DesugarTacticM Unit := veilWithMainContext do
+  CheapRung.recordAttempt
+  let h := mkIdent veilFrameHypName
+  -- Two stages, so `trace.veil.cheapRung` distinguishes the two very
+  -- different reasons a rung declines. "not framed" is the ordinary miss
+  -- this ladder is designed to absorb; "setup" means the local-WP bridge
+  -- or the by-name projection itself is unavailable, which would make the
+  -- rung decline on *every* cell — the silent-failure mode to watch for.
+  -- `all_goals` rather than a bare call, so that a cell whose goal the
+  -- simplification has already closed outright (an invariant the WP
+  -- simplification discharges on its own) counts as a win rather than a
+  -- "no goals to prove" decline.
+  if veil.vc.frameBridge.get (← getOptions) then
+    try
+      unless ← veilApplyFrameBridge? do
+        veilEvalTactic <| ← `(tactic| veil_apply_local_wp)
+    catch ex =>
+      trace[veil.cheapRung] "declined at setup ({invIdent.getId}): \
+        {ex.toMessageData}"
+      throw ex
+    -- A frame cell's goal after the bridge is the conjunct itself behind
+    -- the guards, in the same form as in `hinv`: project and close, no
+    -- simp. Only if that fails, the simps `unveil_local`/`veil_inv_have`
+    -- run (the `nextSimp` dsimp first unfolds the instance's `core`, which
+    -- the frame-bridge theorem leaves folded).
+    let saved ← Tactic.saveState
+    let acc ← get
+    let closed ← try
+        veilInvProjectAll h invIdent
+        veilCloseFrameGoals h
+        pure true
+      catch _ => pure false
+    if closed then
+      CheapRung.recordWin
+      trace[veil.cheapRung] "⚡ closed without a solver or simp ({invIdent.getId})"
+      return
+    saved.restore
+    set acc
+    try
+      veilEvalTactic <| ← `(tacticSeq|
+        all_goals veil_dsimp +$(mkIdent `instances) only [$(mkIdent `nextSimp):ident]
+        all_goals (open $(mkIdent `Classical):ident in
+          veil_simp +$(mkIdent `instances) only [$(mkIdent `smtSimp):ident])
+        all_goals veil_intro_ho
+        all_goals veil_simp +$(mkIdent `instances)
+        all_goals veil_inv_have $h := $invIdent)
+    catch ex =>
+      trace[veil.cheapRung] "declined at setup ({invIdent.getId}): \
+        {ex.toMessageData}"
+      throw ex
+  else
+    try
+      veilEvalTactic <| ← `(tacticSeq|
+        unveil_local
+        all_goals veil_inv_have $h := $invIdent)
+    catch ex =>
+      trace[veil.cheapRung] "declined at setup ({invIdent.getId}): \
+        {ex.toMessageData}"
+      throw ex
   try
-    veilEvalTactic <| ← `(tacticSeq|
-      all_goals (repeat (first | exact $h | exact $h .. | intro _))
-      done)
+    veilCloseFrameGoals h
   catch ex =>
     trace[veil.cheapRung] "declined ({invIdent.getId}): not a frame cell"
     throw ex

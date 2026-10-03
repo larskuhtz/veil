@@ -437,6 +437,17 @@ def elabProveAction : CommandElab := fun stx => do
     let pred := fun (e : VCRegistryEntry) =>
       e.action == actionName && !skipCells.contains (e.action, e.property)
     if allEntries.any pred then
+      -- The action's frame-bridge theorem (`veil.vc.frameBridge`), before
+      -- the dischargers are created: they capture the environment here,
+      -- and the cheap rung of every frame cell instantiates it. Best
+      -- effort — without it the rung runs the bridge per cell, as before.
+      if veil.vc.cheapRung.get (← getOptions) && veil.vc.frameBridge.get (← getOptions) then
+        if let some e := allEntries.find? fun e => pred e && e.kind == .primary
+            && e.style == .wp && e.property != `doesNotThrow then
+          try
+            let _ ← liftTermElabM <| emitFrameBridgeLemma e.type
+          catch ex =>
+            trace[veil.cheapRung] "no frame-bridge theorem for {actionName}: {ex.toMessageData}"
       -- Retain witnesses at the dischargers (`veil.gen.streamTheorems`
       -- semantics) so persistence below never re-runs the proof search.
       Command.withScope (fun sc => { sc with opts := veil.gen.streamTheorems.set sc.opts true }) do
