@@ -331,6 +331,29 @@ purpose, because `repeat` never fails and a branch that "succeeds" having
 closed nothing would make the enclosing `first` commit to it. -/
 syntax (name := veil_solve_frame) "veil_solve_frame" ppSpace ident : tactic
 
+/-- `veil_solve_step_frame` — the cheap non-SMT rung for `step_property`
+cells (`veil.vc.cheapRung`).
+
+Most step cells are frame or near-frame obligations: the action does not
+write the components the two-state property reads, or it writes them under
+a guard that settles the property. Such a cell needs neither the invariant
+clump nor the module's assumptions — only the action's guards and the
+transition's post-state equations. This tactic runs `veil_solve_step`'s own
+route (introduce, expose the transition, split, concretize) with `hinv` and
+`has` cleared first, and finishes each goal with `grind` under a heartbeat
+budget of its own (`veil.vc.stepRungHeartbeats`; heartbeats, not wall
+time, so the outcome is deterministic, and an overrun is a decline).
+`grind` is Lean's own solver-free decision procedure: it uses the
+concretized post-state equations as E-matching facts, so a frame, a
+monotone update and a guard-settled update all close the same way, and its
+proof is kernel-checked like any other term.
+
+It either closes the goal or fails — never half-succeeds, like
+`veil_solve_frame` — so in `first | veil_solve_step_frame | veil_solve_step`
+a cell that needs an invariant or an assumption falls through to the
+solver route. -/
+syntax (name := veil_solve_step_frame) "veil_solve_step_frame" : tactic
+
 /-- Tactic for debugging purposes. Just throws an error. -/
 syntax (name := veil_fail) "veil_fail" : tactic
 
@@ -1528,6 +1551,67 @@ def elabVeilSolveTrConservative : DesugarTacticM Unit := veilWithMainContext do
 def elabVeilSolveStep : DesugarTacticM Unit := veilWithMainContext do
   veilEvalTactic <| ← `(tactic| (veil_intros; __veil_solve_tr_conservative))
 
+/-- Run `x` under a heartbeat budget of its own: `hb` thousand heartbeats
+(the unit of `maxHeartbeats`), counted from now. Exceeding it is a runtime
+exception, which `first | … | …` does not catch, so it is converted here
+into an ordinary error: `none` on success, `some heartbeats-used` when the
+budget ran out. -/
+private def withStepRungBudget (hb : Nat) (x : DesugarTacticM Unit) :
+    DesugarTacticM (Option Nat) := do
+  let start ← IO.getNumHeartbeats
+  tryCatchRuntimeEx
+    (do
+      withTheReader Core.Context
+        (fun ctx => { ctx with maxHeartbeats := hb * 1000, initHeartbeats := start }) x
+      return none)
+    (fun ex => do
+      if ex.isMaxHeartbeat then
+        return some ((← IO.getNumHeartbeats) - start)
+      throw ex)
+
+@[inherit_doc veil_solve_step_frame]
+def elabVeilSolveStepFrame : DesugarTacticM Unit := veilWithMainContext do
+  CheapRung.recordAttempt
+  let hb := veil.vc.stepRungHeartbeats.get (← getOptions)
+  -- `try clear`: the names are the ones `veil_intros` binds; a cell
+  -- without assumptions has no `has` to clear. Clearing only ever loses
+  -- completeness, never soundness — and a cell that needed what was
+  -- cleared declines here and goes to the solver route with it intact.
+  try
+    veilEvalTactic <| ← `(tacticSeq|
+      veil_intros
+      (try clear $(mkIdent `hinv):ident)
+      (try clear $(mkIdent `has):ident)
+      veil_simp +$(mkIdent `instances) only [$(mkIdent `invSimp):ident, $(mkIdent `actSimp):ident] at *
+      veil_simp +$(mkIdent `instances) only [$(mkIdent `ifSimp):ident] at *
+      veil_destruct only [$(mkIdent ``Exists), $(mkIdent ``And)]
+      veil_split_ifs
+      all_goals veil_concretize_tr)
+  catch ex =>
+    trace[veil.cheapRung] "declined at setup (step property): {ex.toMessageData}"
+    throw ex
+  -- `grind` closes each remaining goal, or the rung declines. The budget
+  -- covers the whole close, all goals together. The final check is
+  -- load-bearing for the reason given at `elabVeilSolveFrame`: the rung
+  -- must close everything or fail, never half-succeed.
+  let grindTac ← `(tactic| all_goals grind)
+  let start ← IO.getNumHeartbeats
+  let overrun ← try withStepRungBudget hb (veilEvalTactic grindTac)
+    catch ex =>
+      trace[veil.cheapRung] "declined (step property): {ex.toMessageData}"
+      throw ex
+  if let some used := overrun then
+    trace[veil.cheapRung] "declined (step property): `grind` exceeded \
+      `veil.vc.stepRungHeartbeats` ({hb}; {used / 1000} used)"
+    throwError "veil_solve_step_frame: `grind` exceeded its heartbeat budget \
+      (`veil.vc.stepRungHeartbeats` = {hb})"
+  unless (← getUnsolvedGoals).isEmpty do
+    trace[veil.cheapRung] "declined (step property): goals left"
+    throwError "veil_solve_step_frame: goals left after `grind`"
+  CheapRung.recordWin
+  trace[veil.cheapRung] "⚡ step cell closed without a solver \
+    (`grind`: {((← IO.getNumHeartbeats) - start) / 1000} of {hb} heartbeats)"
+
 /-- Try the local-TR path first; if applying the local bridge theorem fails,
 fall back to the old transition solver.
 
@@ -1750,6 +1834,7 @@ def elabVeilFail : TacticM Unit := veilWithMainContext do
   tactic veil_unveil_local,
   tactic veil_inv_have,
   tactic veil_solve_frame,
+  tactic veil_solve_step_frame,
   tactic veil_fail]
 def elabVeilTactics : Tactic := fun stx => do
   let res : DesugarTacticM Unit :=
@@ -1844,6 +1929,8 @@ def elabVeilTactics : Tactic := fun stx => do
     withTraceNode `veil.perf.tactic (fun _ => return "veil_inv_have") (elabVeilInvHave h inv)
   | `(tactic| veil_solve_frame $inv:ident) => do
     withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_frame") (elabVeilSolveFrame inv)
+  | `(tactic| veil_solve_step_frame) => do
+    withTraceNode `veil.perf.tactic (fun _ => return "veil_solve_step_frame") elabVeilSolveStepFrame
   | `(tactic| veil_fail) => elabVeilFail
   | _ => throwUnsupportedSyntax
   res.runByOption stx

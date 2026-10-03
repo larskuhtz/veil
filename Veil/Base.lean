@@ -266,9 +266,21 @@ register_option veil.vc.cheapRung : Bool := {
   (`veil.smt.retries`) never carry the ladder: the cheap branch has \
   already failed by the time a retry is scheduled. The hit rate is \
   reported as one ⚡ line by `#check_invariants`; per-cell detail is on \
-  `trace.veil.cheapRung`. For a module's own VCs the ladder is baked \
+  `trace.veil.cheapRung`. A `step_property` cell gets the same ladder \
+  with its own cheap rung, `first | veil_solve_step_frame | \
+  veil_solve_step`: the step route with the invariant clump and the \
+  assumptions cleared, finished by `grind`. For a module's own VCs the ladder is baked \
   into the discharger term at `#gen_spec`, so this must be set before \
   it; the cross-file registry commands read it where they run."
+}
+
+register_option veil.vc.stepRungHeartbeats : Nat := {
+  defValue := 20000
+  descr := "Heartbeat budget (in thousands, as `maxHeartbeats`) of the \
+  `grind` call that finishes the cheap rung of a `step_property` cell \
+  (`veil_solve_step_frame`, under `veil.vc.cheapRung`). It bounds what a \
+  declining rung can cost before the cell falls through to the solver \
+  route; a winning rung needs a small fraction of it."
 }
 
 register_option veil.gen.strictLocalSimp : Bool := {

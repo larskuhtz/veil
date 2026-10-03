@@ -426,6 +426,23 @@ on a 60-invariant module is the one unmeasured risk in Part II.
 Counterexamples: the TR path's two-state models are rendered by the
 existing induction renderer, which does not inspect the VC style.
 
+**The cheap rung** (`veil.vc.cheapRung`, port/step-rung). A step cell's
+discharger term is `first | veil_solve_step_frame | veil_solve_step`. The
+rung runs the same route with `hinv` and `has` cleared and finishes each
+goal with `grind`, under a heartbeat budget of its own
+(`veil.vc.stepRungHeartbeats`); an overrun is converted into an ordinary
+failure, because `first` does not catch runtime exceptions. Most step
+cells need neither the invariant clump nor the assumptions — the action
+does not write what the property reads, or writes it under a guard that
+settles it — and simplifying the clump is what dominates the conservative
+route on a large module. Measured on the downstream Cadence models: 49/49
+cells of one Chorus step property closed at ~1 s each against ~16 s on the
+conservative route, 28/28 on its MVBA, 20/21 on its Conductor (the
+remaining cell needs an invariant and falls through). The proof terms are
+about 20× smaller (DAG objects) than the reconstructed solver terms.
+`VeilTest/StepRung.lean` and `VeilTest/StepRungBudget.lean` pin both
+directions and the budget.
+
 ### 3.5 Plumbing
 
 * **Registry**: `VCStyle.step` (`Infra/Metadata.lean`), JSON `"step"`,
